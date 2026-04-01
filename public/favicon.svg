@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none">
+  <!-- 背景 -->
+  <rect width="48" height="48" rx="10" fill="#0a0e1a"/>
+  <!-- 外側の破線リング -->
+  <ellipse cx="24" cy="26" rx="17" ry="14" stroke="#5ce0fc" stroke-width="1" opacity="0.3" stroke-dasharray="2 3"/>
+  <!-- 中間リング -->
+  <ellipse cx="24" cy="25" rx="11" ry="9" stroke="#5ce0fc" stroke-width="1.2" opacity="0.55"/>
+  <!-- 内側リング -->
+  <ellipse cx="24" cy="25" rx="6" ry="5" stroke="#7c5cfc" stroke-width="1.5" opacity="0.8"/>
+  <!-- 中心インク -->
+  <circle cx="24" cy="25" r="3" fill="#5ce0fc" opacity="0.9"/>
+  <!-- 水滴の軌跡 -->
+  <path d="M24 8 Q25.5 14 24 19" stroke="#5ce0fc" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+  <!-- 水滴 -->
+  <circle cx="24" cy="7" r="2" fill="#7c5cfc" opacity="0.8"/>
+  <!-- バックランの指状突起 -->
+  <path d="M13 23 Q11 20 10 18" stroke="#5ce0fc" stroke-width="1" stroke-linecap="round" opacity="0.5"/>
+  <path d="M35 23 Q37 20 38 18" stroke="#5ce0fc" stroke-width="1" stroke-linecap="round" opacity="0.5"/>
+  <path d="M18 34 Q16 37 15 39" stroke="#5ce0fc" stroke-width="1" stroke-linecap="round" opacity="0.4"/>
+  <path d="M30 34 Q32 37 33 39" stroke="#5ce0fc" stroke-width="1" stroke-linecap="round" opacity="0.4"/>
+</svg>
