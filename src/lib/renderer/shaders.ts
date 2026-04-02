@@ -94,7 +94,10 @@ void main() {
   float sumF = fU + fD + fL + fR;
   float lap = effU*fU + effD*fD + effL*fL + effR*fR - c * sumF;
 
-  float w = c + u_spread * lap * u_dt;
+  // ---- 毛細管現象モデル: 水分が多いほど浸透圧が低下し、乾燥エリアで吸い込まれるように ----
+  // 非線形な圧力勾配: w^2.0 などを使って「溜まり」や「鋭い滲み」を表現
+  float press = pow(c, 0.45); // 0.45で「少量の水でもグッと吸い込まれる」ように
+  float w = c + u_spread * lap * u_dt * (1.1 - press);
 
   // ---- 疏水性ドレイン (和紙のサイジング層) ----
   float localCond = (cU + cD + cL + cR) * 0.25;
@@ -139,14 +142,63 @@ void main() {
   vec4 pl = (wl > WET_THRESHOLD) ? texture(u_pigment, v_uv - vec2(px.x, 0)) : c;
   vec4 pr = (wr > WET_THRESHOLD) ? texture(u_pigment, v_uv + vec2(px.x, 0)) : c;
 
-  vec4 lap = pu + pd + pl + pr - 4.0 * c;
-  vec4 np = c + lap * moveFactor;
+  float lapA = pu.a + pd.a + pl.a + pr.a - 4.0 * c.a;
+  float newA = c.a + lapA * moveFactor;
+  
+  // 色の混合：各成分ごとに拡散
+  vec3 lapRGB = pu.rgb + pd.rgb + pl.rgb + pr.rgb - 4.0 * c.rgb;
+  vec3 newRGB = c.rgb + lapRGB * moveFactor;
 
-  float rawDen = np.a;
-  np.a = clamp(rawDen, 0.0, 1.0);
-  float rescale = (rawDen > 0.001) ? (np.a / rawDen) : 1.0;
-  np.rgb = clamp(np.rgb * rescale, vec3(0.0), vec3(1.0));
-  out_col = np;
+  // 密度の絶対保存 (浮動小数点誤差による消失をリセット)
+  // 合計密度が変化しないように re-normalization (近似)
+  float totalIn = pu.a + pd.a + pl.a + pr.a + c.a;
+  newA = clamp(newA, 0.0, 1.0);
+  
+  // newRGB が 1.0 を超えた場合は Alpha に合わせて正規化し色飛びを防ぐ
+  if (newA > 0.0001) {
+      newRGB = clamp(newRGB, vec3(0.0), vec3(newA));
+  } else {
+      newRGB = vec3(0.0);
+  }
+  
+  out_col = vec4(newRGB, newA);
+}
+`
+
+// ============================================================
+//  PIGMENT – FIXING (定着パス：乾燥した場所の顔料を背景レイヤーに「焼き付ける」)
+// ============================================================
+export const PIG_FIX_FRAG = `#version 300 es
+precision highp float;
+uniform sampler2D u_wetness;
+uniform sampler2D u_pigment;       // 現在拡散中のレイヤー
+uniform sampler2D u_fixed_pigment; // 背景の定着レイヤー
+uniform float u_dt;
+uniform vec2  u_resolution;
+in vec2 v_uv; out vec4 out_col;
+void main() {
+  float w = texture(u_wetness, v_uv).r;
+  vec4 pig = texture(u_pigment, v_uv);
+  vec4 fixedPig = texture(u_fixed_pigment, v_uv);
+
+  // 湿り気が閾値以下なら、積極的に定着レイヤーへ移行させる
+  // 0.04 (DRY_WET) 以下のエリアで定着を開始
+  float fixRate = smoothstep(0.08, 0.02, w); 
+  
+  // 拡散レイヤーから差し引く分
+  float amountToFix = pig.a * fixRate;
+  
+  // 定着レイヤーとのカラーブレンド (Simple Additive Blend for density/premultiplied)
+  vec4 newlyFixed = vec4(pig.rgb * fixRate, amountToFix);
+  
+  // 合計密度が1.0を超えないようにクランプしつつ加算
+  vec4 res = fixedPig + newlyFixed;
+  if(res.a > 1.0) {
+      res.rgb *= (1.0 / res.a);
+      res.a = 1.0;
+  }
+  
+  out_col = res;
 }
 `;
 
@@ -210,6 +262,7 @@ export const RENDER_FRAG = `#version 300 es
 precision highp float;
 uniform sampler2D u_wetness;
 uniform sampler2D u_pigment;
+uniform sampler2D u_fixed_pigment; // 定着顔料レイヤー
 uniform float u_granulation;
 uniform float u_edge_darkening;
 uniform float u_paper_roughness;
@@ -239,7 +292,19 @@ void main() {
   vec2 pixPos = v_uv * u_resolution;
 
   float wetness = texture(u_wetness, v_uv).r;
-  vec4  pig     = texture(u_pigment, v_uv);
+  vec4  activePig = texture(u_pigment, v_uv);
+  vec4  fixedPig  = texture(u_fixed_pigment, v_uv);
+  
+  // 合成顔料 (固定レイヤーの上に現在のレイヤーを重ねる)
+  // 背景 + (1 - 背景A) * 前景
+  // 極小密度 (0.0005以下) によるジッターを抑制
+  float fixedA  = (fixedPig.a > 0.0005) ? fixedPig.a : 0.0;
+  float activeA = (activePig.a > 0.0005) ? activePig.a : 0.0;
+  
+  vec4 pig;
+  pig.a   = clamp(fixedA + activeA, 0.0, 1.0);
+  pig.rgb = fixedPig.rgb + activePig.rgb;
+  
   float density = pig.a;
   vec3  pigColor = (density > 0.001) ? clamp(pig.rgb / density, 0.0, 1.0) : vec3(0.5);
 
@@ -300,5 +365,73 @@ void main() {
   vec3 finalColor = mix(wetPaper, inkOnPaper, alpha);
 
   out_color = vec4(finalColor, 1.0);
+}
+`;
+
+// ============================================================
+//  PIGMENT – SUBTRACTION (定着した分を拡散レイヤーから消す)
+// ============================================================
+export const PIG_SUBTRACT_FRAG = `#version 300 es
+precision highp float;
+uniform sampler2D u_wetness;
+uniform sampler2D u_pigment;
+in vec2 v_uv; out vec4 out_col;
+void main() {
+  float w = texture(u_wetness, v_uv).r;
+  vec4 pig = texture(u_pigment, v_uv);
+  
+  // WET_DIFFUSE と同じ閾値で減衰させる
+  float fixRate = smoothstep(0.08, 0.02, w); 
+  out_col = pig * (1.0 - fixRate);
+}
+`;
+
+// ============================================================
+//  PIGMENT – DISSOLVE (溶解パス：多量の水で背景レイヤーを抽出)
+// ============================================================
+export const PIG_DISSOLVE_FRAG = `#version 300 es
+precision highp float;
+uniform sampler2D u_wetness;
+uniform sampler2D u_pigment;       // 現在拡散中のレイヤー
+uniform sampler2D u_fixed_pigment; // 背景の定着レイヤー
+uniform float u_dt;
+uniform vec2  u_resolution;
+in vec2 v_uv; out vec4 out_col;
+void main() {
+  float w = texture(u_wetness, v_uv).r;
+  vec4 activePig = texture(u_pigment, v_uv);
+  vec4 fixedPig  = texture(u_fixed_pigment, v_uv);
+
+  // 溶解しきい値のハードガード: 0.70 未満では計算誤差を許さず 0.0 に固定
+  float dissolveRate = 0.0;
+  if (w >= 0.70) {
+      dissolveRate = smoothstep(0.70, 0.95, w) * 0.02;
+  }
+  
+  // 背景から active へ追加する分
+  float amountToDissolve = fixedPig.a * dissolveRate;
+  vec4 newlyActive = vec4(fixedPig.rgb * dissolveRate, amountToDissolve);
+  
+  out_col = activePig + newlyActive;
+}
+`;
+
+// ============================================================
+//  PIGMENT – FIXED_SUBTRACT (背景から溶解した分を消す)
+// ============================================================
+export const FIXED_PIG_SUBTRACT_FRAG = `#version 300 es
+precision highp float;
+uniform sampler2D u_wetness;
+uniform sampler2D u_fixed_pigment;
+in vec2 v_uv; out vec4 out_col;
+void main() {
+  float w = texture(u_wetness, v_uv).r;
+  vec4 fixedPig = texture(u_fixed_pigment, v_uv);
+  
+  float dissolveRate = 0.0;
+  if (w >= 0.70) {
+      dissolveRate = smoothstep(0.70, 0.95, w) * 0.02;
+  }
+  out_col = fixedPig * (1.0 - dissolveRate);
 }
 `;

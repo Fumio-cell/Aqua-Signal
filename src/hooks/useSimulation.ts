@@ -55,9 +55,11 @@ export function useSimulation(width: number, height: number) {
       lastTimeRef.current = time;
       const p = paramsRef.current;
 
-      if (engineRef.current && p.isPlaying) {
-        engineRef.current.step(p, dt);
-        if (p.isMouseDown) engineRef.current.interact(p);
+      if (engineRef.current) {
+        if (p.isPlaying) {
+          engineRef.current.step(p, dt);
+          if (p.isMouseDown) engineRef.current.interact(p);
+        }
         engineRef.current.render(p);
       }
       rafId = requestAnimationFrame(animate);
@@ -68,7 +70,14 @@ export function useSimulation(width: number, height: number) {
   }, [width, height]);
 
   const updateParams = useCallback((next: Partial<SimulationParams>) => {
-    setParams(prev => ({ ...prev, ...next }));
+    setParams(prev => {
+      const newState = { ...prev, ...next };
+      // 停止 (isPlaying: false) に切り替わった瞬間に強制定着させる
+      if (prev.isPlaying && !newState.isPlaying) {
+        engineRef.current?.fixAllPigment();
+      }
+      return newState;
+    });
   }, []);
 
   const undo = useCallback(() => {

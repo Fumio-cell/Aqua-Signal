@@ -5,6 +5,10 @@ import {
   PIG_DIFFUSE_FRAG,
   WET_INTERACT_FRAG,
   PIG_INTERACT_FRAG,
+  PIG_FIX_FRAG,
+  PIG_SUBTRACT_FRAG,
+  PIG_DISSOLVE_FRAG,
+  FIXED_PIG_SUBTRACT_FRAG,
   RENDER_FRAG,
 } from './shaders';
 
@@ -60,19 +64,29 @@ export class SimulationEngine {
   private pigTex: [WebGLTexture, WebGLTexture];
   private wetFB: [WebGLFramebuffer, WebGLFramebuffer];
   private pigFB: [WebGLFramebuffer, WebGLFramebuffer];
+  private fixedPigTex: [WebGLTexture, WebGLTexture];
+  private fixedPigFB: [WebGLFramebuffer, WebGLFramebuffer];
 
   // Undo snapshots
   private undoWetTex: WebGLTexture;
   private undoPigTex: WebGLTexture;
   private undoWetFB: WebGLFramebuffer;
   private undoPigFB: WebGLFramebuffer;
+  private undoFixedPigTex: WebGLTexture;
+  private undoFixedPigFB: WebGLFramebuffer;
 
   // Shader programs
   private wetDiffProg: WebGLProgram;
   private pigDiffProg: WebGLProgram;
   private wetInterProg: WebGLProgram;
   private pigInterProg: WebGLProgram;
+  private pigFixProg: WebGLProgram;
+  private pigSubProg: WebGLProgram;
+  private pigDissolveProg: WebGLProgram;
+  private fixedPigSubProg: WebGLProgram;
+  private pigFixAllProg: WebGLProgram;
   private renderProg: WebGLProgram;
+  private blitProg: WebGLProgram;
 
   private vao: WebGLVertexArrayObject;
   private currentIdx = 0;
@@ -91,6 +105,11 @@ export class SimulationEngine {
     this.undoPigTex = this.makeTex();
     this.undoWetFB  = this.makeFB(this.undoWetTex);
     this.undoPigFB  = this.makeFB(this.undoPigTex);
+    this.undoFixedPigTex = this.makeTex();
+    this.undoFixedPigFB  = this.makeFB(this.undoFixedPigTex);
+
+    this.fixedPigTex = [this.makeTex(), this.makeTex()];
+    this.fixedPigFB  = [this.makeFB(this.fixedPigTex[0]), this.makeFB(this.fixedPigTex[1])];
 
     // Create programs
     const P = (fs: string) => WebGLUtility.createProgram(gl, VERT_SHADER, fs);
@@ -98,7 +117,28 @@ export class SimulationEngine {
     this.pigDiffProg  = P(PIG_DIFFUSE_FRAG);
     this.wetInterProg = P(WET_INTERACT_FRAG);
     this.pigInterProg = P(PIG_INTERACT_FRAG);
+    this.pigFixProg   = P(PIG_FIX_FRAG);
+    this.pigSubProg   = P(PIG_SUBTRACT_FRAG);
+    this.pigDissolveProg = P(PIG_DISSOLVE_FRAG);
+    this.fixedPigSubProg = P(FIXED_PIG_SUBTRACT_FRAG);
+    this.pigFixAllProg = P(`#version 300 es
+      precision highp float;
+      uniform sampler2D u_active;
+      uniform sampler2D u_fixed;
+      in vec2 v_uv; out vec4 o;
+      void main() {
+        vec4 a = texture(u_active, v_uv);
+        vec4 f = texture(u_fixed, v_uv);
+        vec4 res = a + f;
+        if(res.a > 1.0) { res.rgb *= (1.0/res.a); res.a = 1.0; }
+        o = res;
+      }`);
     this.renderProg   = P(RENDER_FRAG);
+    this.blitProg     = P(`#version 300 es
+      precision highp float;
+      uniform sampler2D u_src;
+      in vec2 v_uv; out vec4 o;
+      void main() { o = texture(u_src, v_uv); }`);
 
     // VAO (required in WebGL2)
     this.vao = gl.createVertexArray()!;
@@ -173,18 +213,89 @@ export class SimulationEngine {
     u2f(gl, this.wetDiffProg, 'u_resolution',      this.width, this.height);
     this.drawQuad();
 
-    // 2. Advect pigment (only where wet)
-    gl.useProgram(this.pigDiffProg);
+    // --------------------------------------------------------
+    // PIGMENT Sequential Pipeline (Cur -> Next -> Cur -> Next)
+    // --------------------------------------------------------
+    
+    // Pass 1: Re-wetting / Dissolve (F -> A)
+    // Source: Active[cur], Fixed[cur] -> Target: Active[next], Fixed[next]
+    gl.useProgram(this.pigDissolveProg);
     this.setViewport(this.pigFB[next]);
-    bindTex(gl, this.pigDiffProg, 'u_wetness', 0, this.wetTex[cur]);
-    bindTex(gl, this.pigDiffProg, 'u_pigment', 1, this.pigTex[cur]);
+    bindTex(gl, this.pigDissolveProg, 'u_wetness', 0, this.wetTex[next]);
+    bindTex(gl, this.pigDissolveProg, 'u_pigment', 1, this.pigTex[cur]);
+    bindTex(gl, this.pigDissolveProg, 'u_fixed_pigment', 2, this.fixedPigTex[cur]);
+    u2f(gl, this.pigDissolveProg, 'u_resolution', this.width, this.height);
+    this.drawQuad();
+
+    gl.useProgram(this.fixedPigSubProg);
+    this.setViewport(this.fixedPigFB[next]);
+    bindTex(gl, this.fixedPigSubProg, 'u_wetness', 0, this.wetTex[next]);
+    bindTex(gl, this.fixedPigSubProg, 'u_fixed_pigment', 1, this.fixedPigTex[cur]);
+    this.drawQuad();
+
+    // Pass 2: Pigment Diffusion
+    // Source: Active[next] -> Target: Active[cur] (use cur as temp)
+    gl.useProgram(this.pigDiffProg);
+    this.setViewport(this.pigFB[cur]);
+    bindTex(gl, this.pigDiffProg, 'u_wetness', 0, this.wetTex[next]);
+    bindTex(gl, this.pigDiffProg, 'u_pigment', 1, this.pigTex[next]);
     u1f(gl, this.pigDiffProg, 'u_spread',      p.spread);
     u1f(gl, this.pigDiffProg, 'u_dt',          scaledDT);
     u1f(gl, this.pigDiffProg, 'u_water_boost', p.waterOnly ? 6.0 : 1.0);
     u2f(gl, this.pigDiffProg, 'u_resolution',  this.width, this.height);
     this.drawQuad();
 
+    // Pass 3: Fix pigment (Active -> Fixed)
+    // Source: Active[cur], Fixed[next] -> Target: Fixed[next] (update in place is not possible, so write to Fixed[cur])
+    gl.useProgram(this.pigFixProg);
+    this.setViewport(this.fixedPigFB[cur]);
+    bindTex(gl, this.pigFixProg, 'u_wetness', 0, this.wetTex[next]);
+    bindTex(gl, this.pigFixProg, 'u_pigment', 1, this.pigTex[cur]);
+    bindTex(gl, this.pigFixProg, 'u_fixed_pigment', 2, this.fixedPigTex[next]);
+    u1f(gl, this.pigFixProg, 'u_dt', scaledDT);
+    u2f(gl, this.pigFixProg, 'u_resolution', this.width, this.height);
+    this.drawQuad();
+
+    // Pass 4: Finalize Active (Subtract fixed part)
+    // Source: Active[cur], Wet[next] -> Target: Active[next]
+    gl.useProgram(this.pigSubProg);
+    this.setViewport(this.pigFB[next]);
+    bindTex(gl, this.pigSubProg, 'u_wetness', 0, this.wetTex[next]);
+    bindTex(gl, this.pigSubProg, 'u_pigment', 1, this.pigTex[cur]);
+    u2f(gl, this.pigSubProg, 'u_resolution', this.width, this.height);
+    this.drawQuad();
+
+    // 不要な Blit を完全に廃止。
+    // Fixed の同期は定着・溶解イベントが発生した際のみ実行されるように修正。
+    // これにより定着済みエリアの1bit単位での静止を保証。
+
     this.currentIdx = next;
+  }
+
+  /** Force fix all active pigment to fixed layer (e.g. on freeze or new layer) */
+  public fixAllPigment() {
+    const gl = this.gl;
+    const cur = this.currentIdx;
+    const next = 1 - cur;
+
+    // 1. Combine onto the 'next' buffer first (avoid feedback loop)
+    gl.useProgram(this.pigFixAllProg);
+    this.setViewport(this.fixedPigFB[next]);
+    bindTex(gl, this.pigFixAllProg, 'u_active', 0, this.pigTex[cur]);
+    bindTex(gl, this.pigFixAllProg, 'u_fixed', 1, this.fixedPigTex[cur]);
+    this.drawQuad();
+
+    // 2. Sync 'cur' from 'next'
+    this.blitTex(this.fixedPigTex[next], this.fixedPigFB[cur]);
+
+    // 3. Clear active and wetness
+    const fbs = [this.wetFB[0], this.wetFB[1], this.pigFB[0], this.pigFB[1]];
+    fbs.forEach(fb => {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+      gl.clearColor(0,0,0,0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+    });
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   }
 
   /** Inject water + pigment at mouse position */
@@ -223,6 +334,11 @@ export class SimulationEngine {
       // waterOnly: pigment バッファを次フレームへそのままコピー
       this.blitTex(this.pigTex[cur], this.pigFB[next]);
     }
+    
+    // 操作時はバッファを強制同期させる (Sync Fixed)
+    for (let i = 0; i < 2; i++) {
+        this.blitTex(this.fixedPigTex[cur], this.fixedPigFB[i]);
+    }
 
     this.currentIdx = next;
   }
@@ -234,6 +350,7 @@ export class SimulationEngine {
     gl.useProgram(this.renderProg);
     bindTex(gl, this.renderProg, 'u_wetness', 0, this.wetTex[this.currentIdx]);
     bindTex(gl, this.renderProg, 'u_pigment', 1, this.pigTex[this.currentIdx]);
+    bindTex(gl, this.renderProg, 'u_fixed_pigment', 2, this.fixedPigTex[this.currentIdx]);
     u1f(gl, this.renderProg, 'u_granulation',     p.granulation);
     u1f(gl, this.renderProg, 'u_edge_darkening',  p.edgeDarkening);
     u1f(gl, this.renderProg, 'u_paper_roughness', p.paperRoughness);
@@ -246,28 +363,23 @@ export class SimulationEngine {
   public saveUndoState() {
     this.blitTex(this.wetTex[this.currentIdx], this.undoWetFB);
     this.blitTex(this.pigTex[this.currentIdx], this.undoPigFB);
+    this.blitTex(this.fixedPigTex[this.currentIdx], this.undoFixedPigFB);
   }
 
   /** Restore undo snapshot */
   public restoreUndoState() {
     this.blitTex(this.undoWetTex, this.wetFB[this.currentIdx]);
     this.blitTex(this.undoPigTex, this.pigFB[this.currentIdx]);
+    this.blitTex(this.undoFixedPigTex, this.fixedPigFB[this.currentIdx]);
   }
 
   private blitTex(src: WebGLTexture, dstFB: WebGLFramebuffer) {
     const gl = this.gl;
-    // Simple passthrough draw
-    const prog = WebGLUtility.createProgram(gl, VERT_SHADER,
-      `#version 300 es
-       precision highp float;
-       uniform sampler2D u_src;
-       in vec2 v_uv; out vec4 o;
-       void main() { o = texture(u_src, v_uv); }`);
-    gl.useProgram(prog);
+    // 使用済みのプログラムを使いまわし
+    gl.useProgram(this.blitProg);
     this.setViewport(dstFB);
-    bindTex(gl, prog, 'u_src', 0, src);
+    bindTex(gl, this.blitProg, 'u_src', 0, src);
     this.drawQuad();
-    gl.deleteProgram(prog);
   }
 
   /** Clear all state */
@@ -276,7 +388,9 @@ export class SimulationEngine {
     const fbs = [
       this.wetFB[0], this.wetFB[1],
       this.pigFB[0], this.pigFB[1],
+      this.fixedPigFB[0], this.fixedPigFB[1],
       this.undoWetFB, this.undoPigFB,
+      this.undoFixedPigFB,
     ];
     fbs.forEach(fb => {
       gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
