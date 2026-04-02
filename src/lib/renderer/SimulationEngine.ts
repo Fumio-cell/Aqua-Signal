@@ -5,6 +5,7 @@ import {
   PIG_DIFFUSE_FRAG,
   WET_INTERACT_FRAG,
   PIG_INTERACT_FRAG,
+  PIG_FIXED_INTERACT_FRAG,
   PIG_FIX_FRAG,
   PIG_SUBTRACT_FRAG,
   PIG_DISSOLVE_FRAG,
@@ -86,6 +87,7 @@ export class SimulationEngine {
   private pigDiffProg: WebGLProgram;
   private wetInterProg: WebGLProgram;
   private pigInterProg: WebGLProgram;
+  private fixedPigInterProg: WebGLProgram;
   private pigFixProg: WebGLProgram;
   private pigSubProg: WebGLProgram;
   private pigDissolveProg: WebGLProgram;
@@ -123,6 +125,7 @@ export class SimulationEngine {
     this.pigDiffProg  = P(PIG_DIFFUSE_FRAG);
     this.wetInterProg = P(WET_INTERACT_FRAG);
     this.pigInterProg = P(PIG_INTERACT_FRAG);
+    this.fixedPigInterProg = P(PIG_FIXED_INTERACT_FRAG);
     this.pigFixProg   = P(PIG_FIX_FRAG);
     this.pigSubProg   = P(PIG_SUBTRACT_FRAG);
     this.pigDissolveProg = P(PIG_DISSOLVE_FRAG);
@@ -174,6 +177,12 @@ export class SimulationEngine {
     gl.bindVertexArray(this.vao);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     gl.bindVertexArray(null);
+
+    // Unbind textures to prevent feedback loops in subsequent passes
+    for (let i = 0; i < 4; i++) {
+      gl.activeTexture(gl.TEXTURE0 + i);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+    }
   }
 
   private setViewport(fb: WebGLFramebuffer | null) {
@@ -260,6 +269,7 @@ export class SimulationEngine {
     this.setViewport(this.pigFB[next]);
     bindTex(gl, this.pigSubProg, 'u_wetness', 0, this.wetTex[next]);
     bindTex(gl, this.pigSubProg, 'u_pigment', 1, this.pigTex[cur]);
+    u1f(gl, this.pigSubProg, 'u_dt',          scaledDT);
     u2f(gl, this.pigSubProg, 'u_resolution', this.width, this.height);
     this.drawQuad();
 
@@ -328,14 +338,22 @@ export class SimulationEngine {
       u1f(gl, this.pigInterProg, 'u_force',      p.injectionForce);
       u2f(gl, this.pigInterProg, 'u_resolution', this.width, this.height);
       this.drawQuad();
+
+      // --- コア部分を定着層へ直接書き込む ---
+      gl.useProgram(this.fixedPigInterProg);
+      this.setViewport(this.fixedPigFB[next]);
+      bindTex(gl, this.fixedPigInterProg, 'u_fixed_pigment', 0, this.fixedPigTex[cur]);
+      u2f(gl, this.fixedPigInterProg, 'u_mouse',      mx, my);
+      u1f(gl, this.fixedPigInterProg, 'u_radius',     p.brushSize);
+      u3f(gl, this.fixedPigInterProg, 'u_color',
+        p.pigmentColor[0], p.pigmentColor[1], p.pigmentColor[2]);
+      u1f(gl, this.fixedPigInterProg, 'u_density',    p.pigmentColor[3]);
+      u1f(gl, this.fixedPigInterProg, 'u_force',      p.injectionForce);
+      u2f(gl, this.fixedPigInterProg, 'u_resolution', this.width, this.height);
+      this.drawQuad();
     } else {
       // waterOnly: pigment バッファを次フレームへそのままコピー
       this.blitTex(this.pigTex[cur], this.pigFB[next]);
-    }
-    
-    // 操作時はバッファを強制同期させる (Sync Fixed)
-    for (let i = 0; i < 2; i++) {
-        this.blitTex(this.fixedPigTex[cur], this.fixedPigFB[i]);
     }
 
     this.currentIdx = next;

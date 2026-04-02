@@ -58,8 +58,8 @@ void main() {
   float baseFlow = u_spread * u_dt * 0.6;
   
   // 外向き膨張圧 (乾いている方向へさらに強く押し出す)
-  // 以前の 6.0 から 4.5 に下げ、不自然な弾け方を抑制
-  float push = 4.5; 
+  // 1.0 まで下げ、中心部の顔料が逃げすぎないように調整
+  float push = 1.0; 
   float pU = mix(1.0, push * f, step(cu, 0.01));
   float pD = mix(1.0, push * f, step(cd, 0.01));
   float pL = mix(1.0, push * f, step(cl, 0.01));
@@ -118,17 +118,24 @@ void main() {
   float wd = texture(u_wetness, v_uv - vec2(0, px.y)).r;
   float wl = texture(u_wetness, v_uv - vec2(px.x, 0)).r;
   float wr = texture(u_wetness, v_uv + vec2(px.x, 0)).r;
-  
   vec2 vel = vec2(wr - wl, wu - wd);
   float speed = length(vel);
   
-  // 水が外側に広がっている場合、顔料も外側に強く押し出される
-  // 倍率を 1.5 から 1.1 に下げ、色の境界が安定するように調整
-  vec2 offset = -vel * u_spread * 1.1 * u_dt * kasureFactor;
-  offset = clamp(offset, -4.0 * px, 4.0 * px);
+  vec2 jitter = vec2(
+    gold_noise(v_uv, u_seed + 2.0),
+    gold_noise(v_uv * 1.5, u_seed + 3.0)
+  ) - 0.5;
+  // 速度ベクトルにノイズを乗せ、滲みの形状を不規則（ギザギザ）にする
+  vec2 perturbedVel = vel + jitter * speed * u_paper_roughness * 1.5;
+  
+  // 紙の繊維の抵抗 (kasureFactor) を利用して、移流の強さに揺らぎを出す
+  vec2 offset = -perturbedVel * u_spread * 1.5 * u_dt * kasureFactor * (0.7 + 0.6 * kasure);
+  offset = clamp(offset, -6.0 * px, 6.0 * px);
   vec4 advected = texture(u_pigment, v_uv + offset);
+  advected = mix(c, advected, 0.6); // 粘性
 
   // ---- 拡散 (Diffusion): Laplacian ----
+  // 基準点は移流後ではなく、現在のピクセル位置 c を使用して計算の安定性を確保
   float moveFactor = u_spread * 0.12 * u_dt * smoothstep(0.001, 0.1, w_c) * u_water_boost * kasureFactor;
   
   vec4 pu = texture(u_pigment, v_uv + vec2(0,  px.y));
@@ -136,10 +143,10 @@ void main() {
   vec4 pl = texture(u_pigment, v_uv - vec2(px.x, 0));
   vec4 pr = texture(u_pigment, v_uv + vec2(px.x, 0));
 
-  float lapA = pu.a + pd.a + pl.a + pr.a - 4.0 * advected.a;
+  float lapA = pu.a + pd.a + pl.a + pr.a - 4.0 * c.a;
   float newA = clamp(advected.a + lapA * moveFactor, 0.0, 1.0);
   
-  vec3 lapRGB = pu.rgb + pd.rgb + pl.rgb + pr.rgb - 4.0 * advected.rgb;
+  vec3 lapRGB = pu.rgb + pd.rgb + pl.rgb + pr.rgb - 4.0 * c.rgb;
   vec3 newRGB = advected.rgb + lapRGB * moveFactor;
   
   if (newA > 0.0001) newRGB = clamp(newRGB, vec3(0.0), vec3(newA));
@@ -164,9 +171,11 @@ void main() {
   vec4 pig = texture(u_pigment, v_uv);
   vec4 fixedPig = texture(u_fixed_pigment, v_uv);
   
-  // 水分が 0.05 以下で定着開始。0 では 100% 定着。
-  // 注意: SUBTRACT側と同じ計算式である必要がある
+  // 水分が 0.05 以下で定着。また、常に一定量(5%)が紙に染み込み、
+  // 筆跡の芯（コア）が残るように調整。
   float fixRate = smoothstep(0.05, 0.0, w); 
+  float instantFix = 0.06 * u_dt * 60.0; // 定着率をわずかに向上
+  fixRate = clamp(fixRate + instantFix, 0.0, 1.0);
   if (w <= 0.0001) fixRate = 1.0; 
 
   vec4 newlyFixed = vec4(pig.rgb * fixRate, pig.a * fixRate);
@@ -186,11 +195,14 @@ export const PIG_SUBTRACT_FRAG = `#version 300 es
 precision highp float;
 uniform sampler2D u_wetness;
 uniform sampler2D u_pigment;
+uniform float u_dt;
 in vec2 v_uv; out vec4 out_col;
 void main() {
   float w = texture(u_wetness, v_uv).r;
   vec4 pig = texture(u_pigment, v_uv);
   float fixRate = smoothstep(0.05, 0.0, w); 
+  float instantFix = 0.06 * u_dt * 60.0;
+  fixRate = clamp(fixRate + instantFix, 0.0, 1.0);
   if (w <= 0.0001) fixRate = 1.0;
   out_col = pig * (1.0 - fixRate);
 }
@@ -285,9 +297,35 @@ in vec2 v_uv; out vec4 out_col;
 void main() {
   vec2 px = v_uv * u_resolution;
   float d = distance(px, u_mouse);
-  float f = clamp(1.0 - d/u_radius, 0.0, 1.0);
+  // 浮遊層の注入の減衰を定着層と完全に一致させ、隙間（白い輪）を無くす
+  float f = pow(clamp(1.0 - d/u_radius, 0.0, 1.0), 0.8);
   vec4 prev = texture(u_pigment, v_uv);
+  
   float addA = u_density * f * u_force;
+  vec3 newColor = mix(prev.rgb/(prev.a+0.0001), u_color, addA/(prev.a+addA+0.0001));
+  float newA = clamp(prev.a + addA, 0.0, 1.0);
+  out_col = vec4(newColor * newA, newA);
+}
+`;
+
+export const PIG_FIXED_INTERACT_FRAG = `#version 300 es
+precision highp float;
+uniform sampler2D u_fixed_pigment;
+uniform vec2 u_mouse;
+uniform float u_radius;
+uniform vec3 u_color;
+uniform float u_density;
+uniform float u_force;
+uniform vec2 u_resolution;
+in vec2 v_uv; out vec4 out_col;
+void main() {
+  vec2 px = v_uv * u_resolution;
+  float d = distance(px, u_mouse);
+  float f = pow(clamp(1.0 - d/u_radius, 0.0, 1.0), 0.8);
+  vec4 prev = texture(u_fixed_pigment, v_uv);
+  
+  // 芯を作るために、インタラクション時に一定割合を直接定着層へ書く
+  float addA = u_density * f * u_force * 0.6; // 60%を即座に定着
   vec3 newColor = mix(prev.rgb/(prev.a+0.0001), u_color, addA/(prev.a+addA+0.0001));
   float newA = clamp(prev.a + addA, 0.0, 1.0);
   out_col = vec4(newColor * newA, newA);
@@ -343,7 +381,10 @@ void main() {
   vec2 px = 1.0 / u_resolution;
   float wdx = texture(u_wetness, v_uv + vec2(px.x, 0)).r - texture(u_wetness, v_uv - vec2(px.x, 0)).r;
   float wdy = texture(u_wetness, v_uv + vec2(0, px.y)).r - texture(u_wetness, v_uv - vec2(0, px.y)).r;
-  float edge = length(vec2(wdx, wdy)) * smoothstep(0.15, 0.0, wet) * u_edge_darkening * 18.0;
+  // エッジ強調 (Darkening): さらにシャープにし(0.03)、ノイズによる強弱(不規則性)を極限まで高める
+  float edgeBase = length(vec2(wdx, wdy)) * smoothstep(0.03, 0.0, wet);
+  float edgeVar = pow(n, 2.0) * 3.0; // 0.0 ~ 3.0 の幅で強烈に変動させる
+  float edge = edgeBase * edgeVar * u_edge_darkening * 4.0;
   result *= (1.0 - edge * alpha);
   
   out_color = vec4(result, 1.0);
