@@ -48,17 +48,18 @@ void main() {
   float cr = texture(u_wetness, v_uv + vec2(px.x, 0)).r;
 
   // ---- 圧力勾配モデル (Pressure Gradient Flow) ----
-  // 圧力 P = w^1.5 (非線形な押し出し)
-  float p_c = pow(c, 1.5);
-  float p_u = pow(cu, 1.5);
-  float p_d = pow(cd, 1.5);
-  float p_l = pow(cl, 1.5);
-  float p_r = pow(cr, 1.5);
+  // 圧力 P = w^1.5 (非線形な押し出し) - 負の値を防ぐために max(0.0, ...)
+  float p_c = pow(max(0.0, c), 1.5);
+  float p_u = pow(max(0.0, cu), 1.5);
+  float p_d = pow(max(0.0, cd), 1.5);
+  float p_l = pow(max(0.0, cl), 1.5);
+  float p_r = pow(max(0.0, cr), 1.5);
 
   float baseFlow = u_spread * u_dt * 0.6;
   
   // 外向き膨張圧 (乾いている方向へさらに強く押し出す)
-  float push = 6.0; 
+  // 以前の 6.0 から 4.5 に下げ、不自然な弾け方を抑制
+  float push = 4.5; 
   float pU = mix(1.0, push * f, step(cu, 0.01));
   float pD = mix(1.0, push * f, step(cd, 0.01));
   float pL = mix(1.0, push * f, step(cl, 0.01));
@@ -107,8 +108,9 @@ void main() {
   float w_c = texture(u_wetness, v_uv).r;
 
   // かすれ (Kasure): 紙の粗さとノイズによる局所的な拡散抵抗
+  // 負の値になると指数関数的に爆発するため、必ず正の実数にする
   float kasure = gold_noise(v_uv, u_seed + 1.23);
-  float kasureFactor = mix(1.0, kasure, u_paper_roughness * 0.85);
+  float kasureFactor = max(0.05, mix(1.0, kasure, u_paper_roughness * 0.85));
 
   // ---- 顔料の移流 (Advection): 水の速い流れに乗って移動する ----
   // 周囲の水分勾配から流れの方向を推定
@@ -121,7 +123,9 @@ void main() {
   float speed = length(vel);
   
   // 水が外側に広がっている場合、顔料も外側に強く押し出される
-  vec2 offset = -vel * u_spread * 1.5 * u_dt * kasureFactor;
+  // 倍率を 1.5 から 1.1 に下げ、色の境界が安定するように調整
+  vec2 offset = -vel * u_spread * 1.1 * u_dt * kasureFactor;
+  offset = clamp(offset, -4.0 * px, 4.0 * px);
   vec4 advected = texture(u_pigment, v_uv + offset);
 
   // ---- 拡散 (Diffusion): Laplacian ----
@@ -311,7 +315,9 @@ float hash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.545
 float noise(vec2 p) {
   vec2 i = floor(p); vec2 f = fract(p);
   f = f*f*(3.0-2.0*f);
-  return mix(mix(hash(i), hash(i+vec2(1,0)), f.x), mix(hash(i+vec2(0,1)), hash(i+vec2(1,1)), f.x), f.y);
+  // ノイズの極端なピクセル飛びを抑えるための若干の平滑化
+  float res = mix(mix(hash(i), hash(i+vec2(1,0)), f.x), mix(hash(i+vec2(0,1)), hash(i+vec2(1,1)), f.x), f.y);
+  return mix(res, 0.5, 0.1); 
 }
 
 void main() {
@@ -321,7 +327,8 @@ void main() {
   
   // 顔料密度
   float density = clamp(a.a + f.a, 0.0, 1.0);
-  vec3 pigCol = (density > 0.001) ? (a.rgb + f.rgb) / density : vec3(0.0);
+  // ゼロ除算による不安定さを排除 (Epsilon)
+  vec3 pigCol = (density > 0.0001) ? (a.rgb + f.rgb) / (density + 0.00001) : vec3(0.0);
   
   vec3 paperColor = vec3(0.97, 0.96, 0.94);
   float n = noise(v_uv * 300.0 + u_seed);

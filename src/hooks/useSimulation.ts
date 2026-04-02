@@ -24,9 +24,9 @@ export function useSimulation(width: number, height: number) {
     isMouseDown: false,
     brushSize: 80,
     waterAmount: 0.7,
-    pigmentColor: [0.08, 0.08, 0.08, 1.0], // Dark ink by default
+    pigmentColor: [0.10, 0.25, 0.82, 1.0], // Sync with App.tsx default (Ink Blue)
     injectionForce: 1.5,
-    paperRoughness: 2.2,
+    paperRoughness: 1.4,
     waterOnly: false,
   });
 
