@@ -10,6 +10,8 @@ import {
   PIG_DISSOLVE_FRAG,
   FIXED_PIG_SUBTRACT_FRAG,
   RENDER_FRAG,
+  PIG_FIX_ALL_FRAG,
+  BLIT_FRAG
 } from './shaders';
 
 export interface SimulationParams {
@@ -38,18 +40,22 @@ export interface SimulationParams {
 
 // ---- tiny uniform helpers ----
 function u1f(gl: WebGL2RenderingContext, prog: WebGLProgram, name: string, v: number) {
-  gl.uniform1f(gl.getUniformLocation(prog, name), v);
+  const loc = gl.getUniformLocation(prog, name);
+  if (loc) gl.uniform1f(loc, v);
 }
 function u2f(gl: WebGL2RenderingContext, prog: WebGLProgram, name: string, x: number, y: number) {
-  gl.uniform2f(gl.getUniformLocation(prog, name), x, y);
+  const loc = gl.getUniformLocation(prog, name);
+  if (loc) gl.uniform2f(loc, x, y);
 }
 function u3f(gl: WebGL2RenderingContext, prog: WebGLProgram, name: string, x: number, y: number, z: number) {
-  gl.uniform3f(gl.getUniformLocation(prog, name), x, y, z);
+  const loc = gl.getUniformLocation(prog, name);
+  if (loc) gl.uniform3f(loc, x, y, z);
 }
 function bindTex(gl: WebGL2RenderingContext, prog: WebGLProgram, name: string, unit: number, tex: WebGLTexture) {
   gl.activeTexture(gl.TEXTURE0 + unit);
   gl.bindTexture(gl.TEXTURE_2D, tex);
-  gl.uniform1i(gl.getUniformLocation(prog, name), unit);
+  const loc = gl.getUniformLocation(prog, name);
+  if (loc) gl.uniform1i(loc, unit);
 }
 
 export class SimulationEngine {
@@ -121,24 +127,9 @@ export class SimulationEngine {
     this.pigSubProg   = P(PIG_SUBTRACT_FRAG);
     this.pigDissolveProg = P(PIG_DISSOLVE_FRAG);
     this.fixedPigSubProg = P(FIXED_PIG_SUBTRACT_FRAG);
-    this.pigFixAllProg = P(`#version 300 es
-      precision highp float;
-      uniform sampler2D u_active;
-      uniform sampler2D u_fixed;
-      in vec2 v_uv; out vec4 o;
-      void main() {
-        vec4 a = texture(u_active, v_uv);
-        vec4 f = texture(u_fixed, v_uv);
-        vec4 res = a + f;
-        if(res.a > 1.0) { res.rgb *= (1.0/res.a); res.a = 1.0; }
-        o = res;
-      }`);
+    this.pigFixAllProg = P(PIG_FIX_ALL_FRAG);
     this.renderProg   = P(RENDER_FRAG);
-    this.blitProg     = P(`#version 300 es
-      precision highp float;
-      uniform sampler2D u_src;
-      in vec2 v_uv; out vec4 o;
-      void main() { o = texture(u_src, v_uv); }`);
+    this.blitProg     = P(BLIT_FRAG);
 
     // VAO (required in WebGL2)
     this.vao = gl.createVertexArray()!;
@@ -206,7 +197,9 @@ export class SimulationEngine {
     bindTex(gl, this.wetDiffProg, 'u_pigment', 1, this.pigTex[cur]);
     u1f(gl, this.wetDiffProg, 'u_spread',          p.spread);
     u1f(gl, this.wetDiffProg, 'u_evaporation',     p.evaporation);
+    // 広がる速度 (dt * flowSpeed) と 乾燥速度 (dt) を分離
     u1f(gl, this.wetDiffProg, 'u_dt',              scaledDT);
+    u1f(gl, this.wetDiffProg, 'u_dt_dry',          dt); 
     u1f(gl, this.wetDiffProg, 'u_paper_roughness', p.paperRoughness);
     u1f(gl, this.wetDiffProg, 'u_seed',            p.seed);
     u1f(gl, this.wetDiffProg, 'u_dissolve_dry',    p.waterOnly ? 1.0 : 0.0);

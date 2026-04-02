@@ -18,7 +18,7 @@ export function useSimulation(width: number, height: number) {
     granulation: 0.55,
     edgeDarkening: 0.22,
     bloom: 0.3,
-    flowSpeed: 8.0,
+    flowSpeed: 25.0,
     isPlaying: true,
     mousePos: [0, 0],
     isMouseDown: false,
@@ -56,8 +56,14 @@ export function useSimulation(width: number, height: number) {
       const p = paramsRef.current;
 
       if (engineRef.current) {
+        // Sub-stepping for stability at high flowSpeed
+        // 1フレームを 32分割して計算することで、爆発を防ぎつつ高速化を実現
         if (p.isPlaying) {
-          engineRef.current.step(p, dt);
+          const subSteps = 32;
+          const subDT = dt / subSteps;
+          for (let i = 0; i < subSteps; i++) {
+            engineRef.current.step(p, subDT);
+          }
           if (p.isMouseDown) engineRef.current.interact(p);
         }
         engineRef.current.render(p);

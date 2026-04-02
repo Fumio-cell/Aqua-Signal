@@ -185,7 +185,7 @@ const App: React.FC = () => {
             min={10} max={300} step={5} unit="px" large
             onChange={v => updateParams({ brushSize: v })} />
           <SliderRow label="Flow Speed" value={params.flowSpeed}
-            min={0.1} max={15} step={0.1} large
+            min={0.1} max={100} step={0.1} large
             onChange={v => updateParams({ flowSpeed: v })} />
           <SliderRow label="Water" value={params.waterAmount}
             min={0.05} max={1} step={0.05} large
