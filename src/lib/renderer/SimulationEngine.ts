@@ -190,14 +190,16 @@ export class SimulationEngine {
     const next = 1 - cur;
     const scaledDT = dt * p.flowSpeed;
 
-    // 1. Diffuse wetness (with paper permeability + settled-pigment blocking)
+    gl.bindVertexArray(this.vao);
+    gl.disable(gl.BLEND);
+
+    // 1. Diffuse wetness
     gl.useProgram(this.wetDiffProg);
     this.setViewport(this.wetFB[next]);
     bindTex(gl, this.wetDiffProg, 'u_wetness', 0, this.wetTex[cur]);
     bindTex(gl, this.wetDiffProg, 'u_pigment', 1, this.pigTex[cur]);
     u1f(gl, this.wetDiffProg, 'u_spread',          p.spread);
     u1f(gl, this.wetDiffProg, 'u_evaporation',     p.evaporation);
-    // 広がる速度 (dt * flowSpeed) と 乾燥速度 (dt) を分離
     u1f(gl, this.wetDiffProg, 'u_dt',              scaledDT);
     u1f(gl, this.wetDiffProg, 'u_dt_dry',          dt); 
     u1f(gl, this.wetDiffProg, 'u_paper_roughness', p.paperRoughness);
@@ -207,13 +209,12 @@ export class SimulationEngine {
     this.drawQuad();
 
     // --------------------------------------------------------
-    // PIGMENT Sequential Pipeline (Cur -> Next -> Cur -> Next)
+    // PIGMENT Sequential Pipeline
     // --------------------------------------------------------
     
-    // Pass 1: Re-wetting / Dissolve (F -> A)
-    // Source: Active[cur], Fixed[cur] -> Target: Active[next], Fixed[next]
+    // Pass 1: Re-wetting / Dissolve (Fixed -> Active)
     gl.useProgram(this.pigDissolveProg);
-    this.setViewport(this.pigFB[next]);
+    this.setViewport(this.pigFB[next]); // Write to Active[next]
     bindTex(gl, this.pigDissolveProg, 'u_wetness', 0, this.wetTex[next]);
     bindTex(gl, this.pigDissolveProg, 'u_pigment', 1, this.pigTex[cur]);
     bindTex(gl, this.pigDissolveProg, 'u_fixed_pigment', 2, this.fixedPigTex[cur]);
@@ -221,13 +222,14 @@ export class SimulationEngine {
     this.drawQuad();
 
     gl.useProgram(this.fixedPigSubProg);
-    this.setViewport(this.fixedPigFB[next]);
+    this.setViewport(this.fixedPigFB[next]); // Write to Fixed[next]
     bindTex(gl, this.fixedPigSubProg, 'u_wetness', 0, this.wetTex[next]);
     bindTex(gl, this.fixedPigSubProg, 'u_fixed_pigment', 1, this.fixedPigTex[cur]);
     this.drawQuad();
 
-    // Pass 2: Pigment Diffusion
-    // Source: Active[next] -> Target: Active[cur] (use cur as temp)
+    // Pass 2: Pigment Diffusion (on Active)
+    // Now Active[next] and Fixed[next] are the updated states.
+    // We diffuse Active[next] and write to Active[cur] (as temp result).
     gl.useProgram(this.pigDiffProg);
     this.setViewport(this.pigFB[cur]);
     bindTex(gl, this.pigDiffProg, 'u_wetness', 0, this.wetTex[next]);
@@ -235,11 +237,14 @@ export class SimulationEngine {
     u1f(gl, this.pigDiffProg, 'u_spread',      p.spread);
     u1f(gl, this.pigDiffProg, 'u_dt',          scaledDT);
     u1f(gl, this.pigDiffProg, 'u_water_boost', p.waterOnly ? 6.0 : 1.0);
+    u1f(gl, this.pigDiffProg, 'u_paper_roughness', p.paperRoughness); 
+    u1f(gl, this.pigDiffProg, 'u_seed',            p.seed);
     u2f(gl, this.pigDiffProg, 'u_resolution',  this.width, this.height);
     this.drawQuad();
 
     // Pass 3: Fix pigment (Active -> Fixed)
-    // Source: Active[cur], Fixed[next] -> Target: Fixed[next] (update in place is not possible, so write to Fixed[cur])
+    // We read Active[cur] (diffused) and Fixed[next] (from dissolve)
+    // Target: Fixed[cur]
     gl.useProgram(this.pigFixProg);
     this.setViewport(this.fixedPigFB[cur]);
     bindTex(gl, this.pigFixProg, 'u_wetness', 0, this.wetTex[next]);
@@ -249,8 +254,8 @@ export class SimulationEngine {
     u2f(gl, this.pigFixProg, 'u_resolution', this.width, this.height);
     this.drawQuad();
 
-    // Pass 4: Finalize Active (Subtract fixed part)
-    // Source: Active[cur], Wet[next] -> Target: Active[next]
+    // Pass 4: Finalize Active (Subtract the fixed part)
+    // We read Active[cur] and write back to Active[next] (to be consistent)
     gl.useProgram(this.pigSubProg);
     this.setViewport(this.pigFB[next]);
     bindTex(gl, this.pigSubProg, 'u_wetness', 0, this.wetTex[next]);
@@ -258,9 +263,9 @@ export class SimulationEngine {
     u2f(gl, this.pigSubProg, 'u_resolution', this.width, this.height);
     this.drawQuad();
 
-    // 不要な Blit を完全に廃止。
-    // Fixed の同期は定着・溶解イベントが発生した際のみ実行されるように修正。
-    // これにより定着済みエリアの1bit単位での静止を保証。
+    // Final Sync: Now Active[next] is the final active, and Fixed[cur] is the final fixed.
+    // To keep it simple, we blit Fixed[cur] -> Fixed[next] so both are synchronized.
+    this.blitTex(this.fixedPigTex[cur], this.fixedPigFB[next]);
 
     this.currentIdx = next;
   }

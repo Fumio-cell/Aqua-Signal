@@ -11,12 +11,12 @@ void main() {
 const COMMON_LIBS = `
 // 黄金比を用いた高品質擬似乱数 (キャンバス座標依存)
 float gold_noise(vec2 seed, float p) {
-  return fract(tan(distance(seed * 1.61803398874989484820459 * p, seed)) * seed.x);
+  return fract(tan(distance(seed * 1.61803398874989484820459 * (p + 0.1), seed)) * seed.x);
 }
 `;
 
 // ============================================================
-//  WET_DIFFUSE_FRAG: 水分拡散 (毛細管現象 + 質量保存膨張)
+//  WET_DIFFUSE_FRAG: 水分拡散 (毛細管現象 + 強力な外向き膨張圧)
 // ============================================================
 export const WET_DIFFUSE_FRAG = `#version 300 es
 precision highp float;
@@ -36,43 +36,49 @@ void main() {
   vec2 px = 1.0 / u_resolution;
   float c = texture(u_wetness, v_uv).r;
 
-  // 隣接セルの実際の水分量
+  // 広域的なノイズによる紙の繊維の偏り (Irregularity)
+  float n1 = gold_noise(v_uv * 0.5, u_seed);
+  float n2 = gold_noise(v_uv * 2.0, u_seed + 0.5);
+  float f = 1.0 + (n1 * 0.6 + n2 * 0.4 - 0.5) * u_paper_roughness;
+
+  // 隣接セルの水分量
   float cu = texture(u_wetness, v_uv + vec2(0, px.y)).r;
   float cd = texture(u_wetness, v_uv - vec2(0, px.y)).r;
   float cl = texture(u_wetness, v_uv - vec2(px.x, 0)).r;
   float cr = texture(u_wetness, v_uv + vec2(px.x, 0)).r;
 
-  // 繊維の抵抗感
-  float n = gold_noise(v_uv, u_seed);
-  float f = 1.0 + (n * 2.0 - 1.0) * u_paper_roughness * 0.15;
+  // ---- 圧力勾配モデル (Pressure Gradient Flow) ----
+  // 圧力 P = w^1.5 (非線形な押し出し)
+  float p_c = pow(c, 1.5);
+  float p_u = pow(cu, 1.5);
+  float p_d = pow(cd, 1.5);
+  float p_l = pow(cl, 1.5);
+  float p_r = pow(cr, 1.5);
 
-  // ---- 質量保存型フラックス計算 ----
-  // 滲み効率を 0.45 へ引き上げ (高速化)
-  float baseFlow = u_spread * u_dt * 0.45;
+  float baseFlow = u_spread * u_dt * 0.6;
   
-  // 膨張圧力: 4.5倍 (筆を置いた瞬間の爆発的な滲みを実現)
-  float innerPush = 4.5;
-  float pushU = mix(1.0, innerPush, step(cu, 0.001));
-  float pushD = mix(1.0, innerPush, step(cd, 0.001));
-  float pushL = mix(1.0, innerPush, step(cl, 0.001));
-  float pushR = mix(1.0, innerPush, step(cr, 0.001));
+  // 外向き膨張圧 (乾いている方向へさらに強く押し出す)
+  float push = 6.0; 
+  float pU = mix(1.0, push * f, step(cu, 0.01));
+  float pD = mix(1.0, push * f, step(cd, 0.01));
+  float pL = mix(1.0, push * f, step(cl, 0.01));
+  float pR = mix(1.0, push * f, step(cr, 0.01));
 
-  // 流出量
-  float flowU = c * baseFlow * pushU * f;
-  float flowD = c * baseFlow * pushD * f;
-  float flowL = c * baseFlow * pushL * f;
-  float flowR = c * baseFlow * pushR * f;
+  // 流束 (Flux)
+  float flowU = max(0.0, p_c - p_u) * baseFlow * pU;
+  float flowD = max(0.0, p_c - p_d) * baseFlow * pD;
+  float flowL = max(0.0, p_c - p_l) * baseFlow * pL;
+  float flowR = max(0.0, p_c - p_r) * baseFlow * pR;
 
-  // 流入量
-  float inU = cu * baseFlow * mix(1.0, innerPush, step(c, 0.001)) * f;
-  float inD = cd * baseFlow * mix(1.0, innerPush, step(c, 0.001)) * f;
-  float inL = cl * baseFlow * mix(1.0, innerPush, step(c, 0.001)) * f;
-  float inR = cr * baseFlow * mix(1.0, innerPush, step(c, 0.001)) * f;
+  float inU = max(0.0, p_u - p_c) * baseFlow * mix(1.0, push * f, step(c, 0.01));
+  float inD = max(0.0, p_d - p_c) * baseFlow * mix(1.0, push * f, step(c, 0.01));
+  float inL = max(0.0, p_l - p_c) * baseFlow * mix(1.0, push * f, step(c, 0.01));
+  float inR = max(0.0, p_r - p_c) * baseFlow * mix(1.0, push * f, step(c, 0.01));
 
   float w = c + (inU + inD + inL + inR) - (flowU + flowD + flowL + flowR);
 
-  // ---- 乾燥・蒸発 ----
-  float drain = c * u_evaporation * u_dt_dry;
+  // ---- 非線形蒸発モデル ----
+  float drain = c * u_evaporation * u_dt_dry * smoothstep(0.0, 0.1, c);
   w = max(0.0, w - drain);
 
   out_col = vec4(clamp(w, 0.0, 1.0), 0.0, 0.0, 1.0);
@@ -80,15 +86,18 @@ void main() {
 `;
 
 // ============================================================
-//  PIGMENT – DIFFUSE (顔料の拡散：隣接セル間の平均化)
+//  PIG_DIFFUSE_FRAG: 顔料の拡散 (Laplacian + かすれノイズ)
 // ============================================================
 export const PIG_DIFFUSE_FRAG = `#version 300 es
 precision highp float;
+${COMMON_LIBS}
 uniform sampler2D u_wetness;
 uniform sampler2D u_pigment;
 uniform float u_spread;
 uniform float u_dt;
 uniform float u_water_boost;
+uniform float u_paper_roughness;
+uniform float u_seed;
 uniform vec2 u_resolution;
 in vec2 v_uv; out vec4 out_col;
 
@@ -97,19 +106,38 @@ void main() {
   vec4 c = texture(u_pigment, v_uv);
   float w_c = texture(u_wetness, v_uv).r;
 
-  float moveFactor = u_spread * 0.015 * u_dt * smoothstep(0.02, 0.18, w_c) * u_water_boost;
-  if (moveFactor < 0.0001) { out_col = c; return; }
+  // かすれ (Kasure): 紙の粗さとノイズによる局所的な拡散抵抗
+  float kasure = gold_noise(v_uv, u_seed + 1.23);
+  float kasureFactor = mix(1.0, kasure, u_paper_roughness * 0.85);
 
+  // ---- 顔料の移流 (Advection): 水の速い流れに乗って移動する ----
+  // 周囲の水分勾配から流れの方向を推定
+  float wu = texture(u_wetness, v_uv + vec2(0, px.y)).r;
+  float wd = texture(u_wetness, v_uv - vec2(0, px.y)).r;
+  float wl = texture(u_wetness, v_uv - vec2(px.x, 0)).r;
+  float wr = texture(u_wetness, v_uv + vec2(px.x, 0)).r;
+  
+  vec2 vel = vec2(wr - wl, wu - wd);
+  float speed = length(vel);
+  
+  // 水が外側に広がっている場合、顔料も外側に強く押し出される
+  vec2 offset = -vel * u_spread * 1.5 * u_dt * kasureFactor;
+  vec4 advected = texture(u_pigment, v_uv + offset);
+
+  // ---- 拡散 (Diffusion): Laplacian ----
+  float moveFactor = u_spread * 0.12 * u_dt * smoothstep(0.001, 0.1, w_c) * u_water_boost * kasureFactor;
+  
   vec4 pu = texture(u_pigment, v_uv + vec2(0,  px.y));
   vec4 pd = texture(u_pigment, v_uv - vec2(0,  px.y));
   vec4 pl = texture(u_pigment, v_uv - vec2(px.x, 0));
   vec4 pr = texture(u_pigment, v_uv + vec2(px.x, 0));
 
-  float lapA = pu.a + pd.a + pl.a + pr.a - 4.0 * c.a;
-  float newA = clamp(c.a + lapA * moveFactor, 0.0, 1.0);
+  float lapA = pu.a + pd.a + pl.a + pr.a - 4.0 * advected.a;
+  float newA = clamp(advected.a + lapA * moveFactor, 0.0, 1.0);
   
-  vec3 lapRGB = pu.rgb + pd.rgb + pl.rgb + pr.rgb - 4.0 * c.rgb;
-  vec3 newRGB = c.rgb + lapRGB * moveFactor;
+  vec3 lapRGB = pu.rgb + pd.rgb + pl.rgb + pr.rgb - 4.0 * advected.rgb;
+  vec3 newRGB = advected.rgb + lapRGB * moveFactor;
+  
   if (newA > 0.0001) newRGB = clamp(newRGB, vec3(0.0), vec3(newA));
   else newRGB = vec3(0.0);
   
@@ -118,7 +146,7 @@ void main() {
 `;
 
 // ============================================================
-//  PIGMENT – FIXING (顔料の定着：水分に比例して背景へ移行)
+//  PIGMENT – FIXING (顔料の定着：水分がなくなると紙に吸着)
 // ============================================================
 export const PIG_FIX_FRAG = `#version 300 es
 precision highp float;
@@ -131,8 +159,12 @@ void main() {
   float w = texture(u_wetness, v_uv).r;
   vec4 pig = texture(u_pigment, v_uv);
   vec4 fixedPig = texture(u_fixed_pigment, v_uv);
-  float fixRate = smoothstep(0.08, 0.02, w) * clamp(u_dt * 5.0, 0.0, 1.0); 
   
+  // 水分が 0.05 以下で定着開始。0 では 100% 定着。
+  // 注意: SUBTRACT側と同じ計算式である必要がある
+  float fixRate = smoothstep(0.05, 0.0, w); 
+  if (w <= 0.0001) fixRate = 1.0; 
+
   vec4 newlyFixed = vec4(pig.rgb * fixRate, pig.a * fixRate);
   vec4 res = fixedPig + newlyFixed;
   if(res.a > 1.0) {
@@ -144,7 +176,7 @@ void main() {
 `;
 
 // ============================================================
-//  PIGMENT – SUBTRACTION (定着した分をActiveから引く)
+//  PIGMENT – SUBTRACTION
 // ============================================================
 export const PIG_SUBTRACT_FRAG = `#version 300 es
 precision highp float;
@@ -154,7 +186,8 @@ in vec2 v_uv; out vec4 out_col;
 void main() {
   float w = texture(u_wetness, v_uv).r;
   vec4 pig = texture(u_pigment, v_uv);
-  float fixRate = smoothstep(0.08, 0.02, w); 
+  float fixRate = smoothstep(0.05, 0.0, w); 
+  if (w <= 0.0001) fixRate = 1.0;
   out_col = pig * (1.0 - fixRate);
 }
 `;
@@ -180,7 +213,7 @@ void main() {
 `;
 
 // ============================================================
-//  PIGMENT – DISSOLVE / FIXED_SUBTRACT (溶解)
+//  PIGMENT – DISSOLVE / FIXED_SUBTRACT
 // ============================================================
 export const PIG_DISSOLVE_FRAG = `#version 300 es
 precision highp float;
@@ -192,7 +225,7 @@ void main() {
   float w = texture(u_wetness, v_uv).r;
   vec4 p = texture(u_pigment, v_uv);
   vec4 fp = texture(u_fixed_pigment, v_uv);
-  float dr = (w >= 0.65) ? smoothstep(0.65, 0.95, w) * 0.02 : 0.0;
+  float dr = (w >= 0.6) ? smoothstep(0.6, 0.9, w) * 0.03 : 0.0;
   out_col = p + fp * dr;
 }
 `;
@@ -205,13 +238,13 @@ in vec2 v_uv; out vec4 out_col;
 void main() {
   float w = texture(u_wetness, v_uv).r;
   vec4 fp = texture(u_fixed_pigment, v_uv);
-  float dr = (w >= 0.65) ? smoothstep(0.65, 0.95, w) * 0.02 : 0.0;
+  float dr = (w >= 0.6) ? smoothstep(0.6, 0.9, w) * 0.03 : 0.0;
   out_col = fp * (1.0 - dr);
 }
 `;
 
 // ============================================================
-//  WETNESS / PIGMENT INTERACTION
+//  INTERACTION
 // ============================================================
 export const WET_INTERACT_FRAG = `#version 300 es
 precision highp float;
@@ -225,7 +258,11 @@ in vec2 v_uv; out vec4 out_col;
 void main() {
   vec2 px = v_uv * u_resolution;
   float d = distance(px, u_mouse);
-  float f = clamp(1.0 - d/u_radius, 0.0, 1.0);
+  
+  // 指の動きで水を「押し出す」ような減衰
+  float splash = smoothstep(u_radius, 0.0, d);
+  float f = splash * (1.0 + u_force * 0.5);
+  
   float prev = texture(u_wetness, v_uv).r;
   out_col = vec4(clamp(prev + u_water * f * u_force, 0.0, 1.0), 0, 0, 1);
 }
@@ -282,6 +319,7 @@ void main() {
   vec4 a = texture(u_pigment, v_uv);
   vec4 f = texture(u_fixed_pigment, v_uv);
   
+  // 顔料密度
   float density = clamp(a.a + f.a, 0.0, 1.0);
   vec3 pigCol = (density > 0.001) ? (a.rgb + f.rgb) / density : vec3(0.0);
   
@@ -289,15 +327,16 @@ void main() {
   float n = noise(v_uv * 300.0 + u_seed);
   float grain = 1.0 + (n - 0.5) * u_granulation * 0.4 * u_paper_roughness;
   
-  float alpha = smoothstep(0.01, 0.3, density * grain);
+  // 滲みの端を柔らかくしつつ、低密度でも色を残す
+  float alpha = smoothstep(0.002, 0.25, density * grain);
   
   vec3 result = mix(paperColor, pigCol, alpha);
   
-  // Edge darkening
+  // エッジの暗色化 (水分が引く際の顔料溜まり)
   vec2 px = 1.0 / u_resolution;
   float wdx = texture(u_wetness, v_uv + vec2(px.x, 0)).r - texture(u_wetness, v_uv - vec2(px.x, 0)).r;
   float wdy = texture(u_wetness, v_uv + vec2(0, px.y)).r - texture(u_wetness, v_uv - vec2(0, px.y)).r;
-  float edge = length(vec2(wdx, wdy)) * smoothstep(0.1, 0.0, wet) * u_edge_darkening * 15.0;
+  float edge = length(vec2(wdx, wdy)) * smoothstep(0.15, 0.0, wet) * u_edge_darkening * 18.0;
   result *= (1.0 - edge * alpha);
   
   out_color = vec4(result, 1.0);
