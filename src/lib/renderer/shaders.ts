@@ -55,10 +55,12 @@ void main() {
   float p_l = pow(max(0.0, cl), 1.5);
   float p_r = pow(max(0.0, cr), 1.5);
 
-  float baseFlow = u_spread * u_dt * 0.6;
+  // 拡散の不規則化: 紙の粗さを水圧の伝播に反映し、トゲのある形状を作る
+  float noiseVal = gold_noise(v_uv * 400.0, u_seed) * u_paper_roughness;
+  float irregularSpread = u_spread * (1.0 + noiseVal * 3.0);
+  float baseFlow = irregularSpread * u_dt * 0.6;
   
   // 外向き膨張圧 (乾いている方向へさらに強く押し出す)
-  // 1.0 まで下げ、中心部の顔料が逃げすぎないように調整
   float push = 1.0; 
   float pU = mix(1.0, push * f, step(cu, 0.01));
   float pD = mix(1.0, push * f, step(cd, 0.01));
@@ -129,7 +131,11 @@ void main() {
   vec2 perturbedVel = vel + jitter * speed * u_paper_roughness * 1.5;
   
   // 紙の繊維の抵抗 (kasureFactor) を利用して、移流の強さに揺らぎを出す
+  // 【新要素】粘性 (Viscosity): 顔料密度が高い中心部は、水の流れによる移動を大幅に制限する
+  float viscosity = smoothstep(0.2, 0.9, c.a);
   vec2 offset = -perturbedVel * u_spread * 1.5 * u_dt * kasureFactor * (0.7 + 0.6 * kasure);
+  offset *= (1.0 - viscosity * 0.85); // 濃い墨は中心に踏みとどまる
+  
   offset = clamp(offset, -6.0 * px, 6.0 * px);
   vec4 advected = texture(u_pigment, v_uv + offset);
   advected = mix(c, advected, 0.6); // 粘性
@@ -297,8 +303,9 @@ in vec2 v_uv; out vec4 out_col;
 void main() {
   vec2 px = v_uv * u_resolution;
   float d = distance(px, u_mouse);
-  // 浮遊層の注入の減衰を定着層と完全に一致させ、隙間（白い輪）を無くす
-  float f = pow(clamp(1.0 - d/u_radius, 0.0, 1.0), 0.8);
+  // 注入モデルの軟化: 最初から「壁」を作らないよう、非常に広いガウス分布(pow 2.0)を採用。
+  // これにより、色はまず中心に落ち、そこから水に乗って「外側」へ運ばれます。
+  float f = pow(clamp(1.0 - d/u_radius, 0.0, 1.0), 2.0);
   vec4 prev = texture(u_pigment, v_uv);
   
   float addA = u_density * f * u_force;
@@ -321,11 +328,13 @@ in vec2 v_uv; out vec4 out_col;
 void main() {
   vec2 px = v_uv * u_resolution;
   float d = distance(px, u_mouse);
-  float f = pow(clamp(1.0 - d/u_radius, 0.0, 1.0), 0.8);
+  // 定着層(Fixed)も同様に柔らかく注入し、中心部の「芯」のみを確保。
+  float f = pow(clamp(1.0 - d/u_radius, 0.0, 1.0), 2.5);
   vec4 prev = texture(u_fixed_pigment, v_uv);
-  
-  // 芯を作るために、インタラクション時に一定割合を直接定着層へ書く
-  float addA = u_density * f * u_force * 0.6; // 60%を即座に定着
+
+  // 芯を作るために、定着層へ直接書く。
+  // 粘性によって墨が維持されるため、過剰な注入(1.3倍等)は不要になる。
+  float addA = u_density * f * u_force * 0.9; 
   vec3 newColor = mix(prev.rgb/(prev.a+0.0001), u_color, addA/(prev.a+addA+0.0001));
   float newA = clamp(prev.a + addA, 0.0, 1.0);
   out_col = vec4(newColor * newA, newA);
@@ -362,29 +371,45 @@ void main() {
   float wet = texture(u_wetness, v_uv).r;
   vec4 a = texture(u_pigment, v_uv);
   vec4 f = texture(u_fixed_pigment, v_uv);
+  float activePig = a.a;
+  float fixedPig = f.a;
   
   // 顔料密度
   float density = clamp(a.a + f.a, 0.0, 1.0);
   // ゼロ除算による不安定さを排除 (Epsilon)
   vec3 pigCol = (density > 0.0001) ? (a.rgb + f.rgb) / (density + 0.00001) : vec3(0.0);
-  
+
   vec3 paperColor = vec3(0.97, 0.96, 0.94);
-  float n = noise(v_uv * 300.0 + u_seed);
-  float grain = 1.0 + (n - 0.5) * u_granulation * 0.4 * u_paper_roughness;
   
-  // 滲みの端を柔らかくしつつ、低密度でも色を残す
-  float alpha = smoothstep(0.002, 0.25, density * grain);
+  // 粒状感 (Granulation): 蜂の巣状（Voronoi）の微細なノイズを加え、顔料が紙の窪みに溜まる様子を再現。
+  // これにより、単なる平坦な塗りではなく、水彩特有の「溜まり」が生まれます。
+  float n = noise(v_uv * 400.0 + u_seed);
+  float n2 = gold_noise(v_uv, u_seed + 0.1);
+  float cellular = pow(abs(n - n2), 0.5);
+  float grain = 1.0 + (cellular - 0.5) * u_granulation * 0.6 * u_paper_roughness;
+  
+  // 滲みの端を滑らかにしつつ、中心部が透けないよう閾値を調整 (0.001)
+  float alpha = smoothstep(0.001, 0.2, density * grain);
   
   vec3 result = mix(paperColor, pigCol, alpha);
   
-  // エッジの暗色化 (水分が引く際の顔料溜まり)
+  // ---- エッジ抽出ロジック ----
+  // 顔料の密度勾配を検出し、墨が溜まる端だけに鋭いラインを入れる
   vec2 px = 1.0 / u_resolution;
-  float wdx = texture(u_wetness, v_uv + vec2(px.x, 0)).r - texture(u_wetness, v_uv - vec2(px.x, 0)).r;
-  float wdy = texture(u_wetness, v_uv + vec2(0, px.y)).r - texture(u_wetness, v_uv - vec2(0, px.y)).r;
-  // エッジ強調 (Darkening): さらにシャープにし(0.03)、ノイズによる強弱(不規則性)を極限まで高める
-  float edgeBase = length(vec2(wdx, wdy)) * smoothstep(0.03, 0.0, wet);
-  float edgeVar = pow(n, 2.0) * 3.0; // 0.0 ~ 3.0 の幅で強烈に変動させる
-  float edge = edgeBase * edgeVar * u_edge_darkening * 4.0;
+  float d_px = texture(u_pigment, v_uv + vec2(px.x, 0)).a + texture(u_fixed_pigment, v_uv + vec2(px.x, 0)).a;
+  float d_mx = texture(u_pigment, v_uv - vec2(px.x, 0)).a + texture(u_fixed_pigment, v_uv - vec2(px.x, 0)).a;
+  float d_py = texture(u_pigment, v_uv + vec2(0, px.y)).a + texture(u_fixed_pigment, v_uv + vec2(0, px.y)).a;
+  float d_my = texture(u_pigment, v_uv - vec2(0, px.y)).a + texture(u_fixed_pigment, v_uv - vec2(0, px.y)).a;
+  
+  // エッジ再定義: 勾配ではなく「水の最前線(Frontier)」で顔料を強調する
+  // 水が少ない(乾燥領域との境界)場所で、顔料の密度に応じて暗くする
+  float edgeFrontier = (1.0 - smoothstep(0.04, 0.18, wet)) * (activePig + fixedPig);
+  float edgeNoise = pow(noise(v_uv * 800.0 + u_seed), 2.5) * 5.5; // より鋭く、不規則に
+  float edge = edgeFrontier * edgeNoise * u_edge_darkening * 1.8;
+  
+  // 芯に近い場所ではエッジを抑制（中抜き防止を強化）
+  edge *= smoothstep(0.06, 0.22, wet);
+  
   result *= (1.0 - edge * alpha);
   
   out_color = vec4(result, 1.0);

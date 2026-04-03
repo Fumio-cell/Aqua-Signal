@@ -64,7 +64,7 @@ export function useSimulation(width: number, height: number) {
           for (let i = 0; i < subSteps; i++) {
             engineRef.current.step(p, subDT);
           }
-          if (p.isMouseDown) engineRef.current.interact(p);
+          engineRef.current.interact(p);
         }
         engineRef.current.render(p);
       }

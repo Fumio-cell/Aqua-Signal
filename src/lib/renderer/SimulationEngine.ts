@@ -98,6 +98,7 @@ export class SimulationEngine {
 
   private vao: WebGLVertexArrayObject;
   private currentIdx = 0;
+  private prevMousePos: [number, number] | null = null;
 
   constructor(gl: WebGL2RenderingContext, width: number, height: number) {
     this.gl = gl;
@@ -306,7 +307,10 @@ export class SimulationEngine {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   }
 
-  /** Inject water + pigment at mouse position */
+  /** 
+   * Inject water + pigment at mouse position.
+   * Handles path interpolation to ensure continuous strokes.
+   */
   public interact(p: SimulationParams) {
     const gl = this.gl;
     const cur  = this.currentIdx;
@@ -314,48 +318,79 @@ export class SimulationEngine {
     const mx   = p.mousePos[0];
     const my   = this.height - p.mousePos[1]; // flip Y
 
-    // 3. Inject wetness
-    gl.useProgram(this.wetInterProg);
-    this.setViewport(this.wetFB[next]);
-    bindTex(gl, this.wetInterProg, 'u_wetness', 0, this.wetTex[cur]);
-    u2f(gl, this.wetInterProg, 'u_mouse',      mx, my);
-    u1f(gl, this.wetInterProg, 'u_radius',     p.brushSize);
-    u1f(gl, this.wetInterProg, 'u_water',      p.waterAmount);
-    u1f(gl, this.wetInterProg, 'u_force',      p.injectionForce);
-    u2f(gl, this.wetInterProg, 'u_resolution', this.width, this.height);
-    this.drawQuad();
-
-    // 4. Inject pigment (水のみモードでは顔料をスキップ)
-    if (!p.waterOnly) {
-      gl.useProgram(this.pigInterProg);
-      this.setViewport(this.pigFB[next]);
-      bindTex(gl, this.pigInterProg, 'u_pigment', 0, this.pigTex[cur]);
-      u2f(gl, this.pigInterProg, 'u_mouse',      mx, my);
-      u1f(gl, this.pigInterProg, 'u_radius',     p.brushSize);
-      u3f(gl, this.pigInterProg, 'u_color',
-        p.pigmentColor[0], p.pigmentColor[1], p.pigmentColor[2]);
-      u1f(gl, this.pigInterProg, 'u_density',    p.pigmentColor[3]);
-      u1f(gl, this.pigInterProg, 'u_force',      p.injectionForce);
-      u2f(gl, this.pigInterProg, 'u_resolution', this.width, this.height);
-      this.drawQuad();
-
-      // --- コア部分を定着層へ直接書き込む ---
-      gl.useProgram(this.fixedPigInterProg);
-      this.setViewport(this.fixedPigFB[next]);
-      bindTex(gl, this.fixedPigInterProg, 'u_fixed_pigment', 0, this.fixedPigTex[cur]);
-      u2f(gl, this.fixedPigInterProg, 'u_mouse',      mx, my);
-      u1f(gl, this.fixedPigInterProg, 'u_radius',     p.brushSize);
-      u3f(gl, this.fixedPigInterProg, 'u_color',
-        p.pigmentColor[0], p.pigmentColor[1], p.pigmentColor[2]);
-      u1f(gl, this.fixedPigInterProg, 'u_density',    p.pigmentColor[3]);
-      u1f(gl, this.fixedPigInterProg, 'u_force',      p.injectionForce);
-      u2f(gl, this.fixedPigInterProg, 'u_resolution', this.width, this.height);
-      this.drawQuad();
-    } else {
-      // waterOnly: pigment バッファを次フレームへそのままコピー
-      this.blitTex(this.pigTex[cur], this.pigFB[next]);
+    if (!p.isMouseDown) {
+      this.prevMousePos = null;
+      return;
     }
 
+    const points: [number, number][] = [];
+    if (this.prevMousePos) {
+      const dx = mx - this.prevMousePos[0];
+      const dy = my - this.prevMousePos[1];
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      // ブラシサイズの1/4間隔で補間して「泡立ち」を防ぐ
+      const stepCount = Math.max(1, Math.ceil(dist / (p.brushSize * 0.25)));
+      for (let i = 1; i <= stepCount; i++) {
+        const t = i / stepCount;
+        points.push([
+          this.prevMousePos[0] + dx * t,
+          this.prevMousePos[1] + dy * t
+        ]);
+      }
+    } else {
+      points.push([mx, my]);
+    }
+    this.prevMousePos = [mx, my];
+
+    for (const pt of points) {
+      const px = pt[0];
+      const py = pt[1];
+
+      // 3. Inject wetness
+      gl.useProgram(this.wetInterProg);
+      this.setViewport(this.wetFB[next]);
+      bindTex(gl, this.wetInterProg, 'u_wetness', 0, this.wetTex[cur]);
+      u2f(gl, this.wetInterProg, 'u_mouse',      px, py);
+      u1f(gl, this.wetInterProg, 'u_radius',     p.brushSize);
+      u1f(gl, this.wetInterProg, 'u_water',      p.waterAmount);
+      u1f(gl, this.wetInterProg, 'u_force',      p.injectionForce);
+      u2f(gl, this.wetInterProg, 'u_resolution', this.width, this.height);
+      this.drawQuad();
+      this.blitTex(this.wetTex[next], this.wetFB[cur]); // 即時同期
+
+      // 4. Inject pigment
+      if (!p.waterOnly) {
+        gl.useProgram(this.pigInterProg);
+        this.setViewport(this.pigFB[next]);
+        bindTex(gl, this.pigInterProg, 'u_pigment', 0, this.pigTex[cur]);
+        u2f(gl, this.pigInterProg, 'u_mouse',      px, py);
+        u1f(gl, this.pigInterProg, 'u_radius',     p.brushSize);
+        u3f(gl, this.pigInterProg, 'u_color',
+          p.pigmentColor[0], p.pigmentColor[1], p.pigmentColor[2]);
+        u1f(gl, this.pigInterProg, 'u_density',    p.pigmentColor[3]);
+        u1f(gl, this.pigInterProg, 'u_force',      p.injectionForce);
+        u2f(gl, this.pigInterProg, 'u_resolution', this.width, this.height);
+        this.drawQuad();
+        this.blitTex(this.pigTex[next], this.pigFB[cur]); 
+
+        gl.useProgram(this.fixedPigInterProg);
+        this.setViewport(this.fixedPigFB[next]);
+        bindTex(gl, this.fixedPigInterProg, 'u_fixed_pigment', 0, this.fixedPigTex[cur]);
+        u2f(gl, this.fixedPigInterProg, 'u_mouse',      px, py);
+        u1f(gl, this.fixedPigInterProg, 'u_radius',     p.brushSize);
+        u3f(gl, this.fixedPigInterProg, 'u_color',
+          p.pigmentColor[0], p.pigmentColor[1], p.pigmentColor[2]);
+        u1f(gl, this.fixedPigInterProg, 'u_density',    p.pigmentColor[3]);
+        u1f(gl, this.fixedPigInterProg, 'u_force',      p.injectionForce);
+        u2f(gl, this.fixedPigInterProg, 'u_resolution', this.width, this.height);
+        this.drawQuad();
+        this.blitTex(this.fixedPigTex[next], this.fixedPigFB[cur]);
+      }
+    }
+
+    if (p.waterOnly) {
+      this.blitTex(this.pigTex[cur], this.pigFB[next]);
+    }
     this.currentIdx = next;
   }
 
@@ -375,7 +410,7 @@ export class SimulationEngine {
     this.drawQuad();
   }
 
-  /** Save undo snapshot (call before new stroke) */
+  /** Save undo snapshot */
   public saveUndoState() {
     this.blitTex(this.wetTex[this.currentIdx], this.undoWetFB);
     this.blitTex(this.pigTex[this.currentIdx], this.undoPigFB);
@@ -391,7 +426,6 @@ export class SimulationEngine {
 
   private blitTex(src: WebGLTexture, dstFB: WebGLFramebuffer) {
     const gl = this.gl;
-    // 使用済みのプログラムを使いまわし
     gl.useProgram(this.blitProg);
     this.setViewport(dstFB);
     bindTex(gl, this.blitProg, 'u_src', 0, src);
@@ -415,5 +449,6 @@ export class SimulationEngine {
     });
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this.currentIdx = 0;
+    this.prevMousePos = null;
   }
 }
