@@ -59,6 +59,14 @@ function bindTex(gl: WebGL2RenderingContext, prog: WebGLProgram, name: string, u
   if (loc) gl.uniform1i(loc, unit);
 }
 
+function clamp(v: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, v));
+}
+function smoothstep(edge0: number, edge1: number, x: number) {
+  const t = clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
+  return t * t * (3.0 - 2.0 * t);
+}
+
 export class SimulationEngine {
   private gl: WebGL2RenderingContext;
   private width: number;
@@ -173,6 +181,17 @@ export class SimulationEngine {
     return fb;
   }
 
+  private setViewport(fb: WebGLFramebuffer | null) {
+    this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, fb);
+    this.gl.viewport(0, 0, this.width, this.height);
+  }
+
+  private clearFB(fb: WebGLFramebuffer) {
+    this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, fb);
+    this.gl.clearColor(0, 0, 0, 0);
+    this.gl.clear(this.gl.COLOR_BUFFER_BIT);
+  }
+
   private drawQuad() {
     const gl = this.gl;
     gl.bindVertexArray(this.vao);
@@ -184,11 +203,6 @@ export class SimulationEngine {
       gl.activeTexture(gl.TEXTURE0 + i);
       gl.bindTexture(gl.TEXTURE_2D, null);
     }
-  }
-
-  private setViewport(fb: WebGLFramebuffer | null) {
-    this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, fb);
-    this.gl.viewport(0, 0, this.width, this.height);
   }
 
   // ---- Public API ----
@@ -410,7 +424,87 @@ export class SimulationEngine {
     this.drawQuad();
   }
 
+  /** Clear all textures and state */
+  public clear() {
+    this.currentIdx = 0;
+    this.prevMousePos = null;
+    
+    // Clear all simulation and undo buffers
+    const fbs = [
+      this.wetFB[0], this.wetFB[1],
+      this.pigFB[0], this.pigFB[1],
+      this.fixedPigFB[0], this.fixedPigFB[1],
+      this.undoWetFB, this.undoPigFB,
+      this.undoFixedPigFB
+    ];
+    fbs.forEach(fb => this.clearFB(fb));
+    
+    this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, null);
+  }
+
   /** Save undo snapshot */
+  /**
+   * Import an image as fixed pigment.
+   * This allows the user to 're-edit' a photo with the watercolor effect.
+   */
+  public importImage(img: HTMLImageElement) {
+    const gl = this.gl;
+    const cur = this.currentIdx;
+
+    // 1. Create a temporary canvas for resizing and aspect-ratio maintenance
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = this.width;
+    tempCanvas.height = this.height;
+    const ctx = tempCanvas.getContext('2d')!;
+
+    // Background should be transparent or match paper color? 
+    // We treat it as ink, so transparent/black-alpha is best.
+    ctx.clearRect(0, 0, this.width, this.height);
+
+    // Calculate scaling (Fit Contain)
+    const scale = Math.min(this.width / img.width, this.height / img.height);
+    const nw = img.width * scale;
+    const nh = img.height * scale;
+    const nx = (this.width - nw) / 2;
+    const ny = (this.height - nh) / 2;
+
+    ctx.drawImage(img, nx, ny, nw, nh);
+    const imageData = ctx.getImageData(0, 0, this.width, this.height);
+    const pixels = imageData.data;
+
+    // 2. Convert white areas to transparent (Treating white as paper)
+    // Also flip Y-axis for WebGL (which starts (0,0) at bottom-left)
+    const floatPixels = new Float32Array(this.width * this.height * 4);
+    for (let y = 0; y < this.height; y++) {
+      for (let x = 0; x < this.width; x++) {
+        const srcIdx = (y * this.width + x) * 4;
+        // WebGL is bottom-to-top, so we flip Y here
+        const dstIdx = ((this.height - 1 - y) * this.width + x) * 4;
+
+        const r = pixels[srcIdx] / 255;
+        const g = pixels[srcIdx+1] / 255;
+        const b = pixels[srcIdx+2] / 255;
+        const gray = (r + g + b) / 3.0;
+
+        // Simple white-to-alpha: bright areas become transparent (paper)
+        let a = 1.0 - smoothstep(0.85, 0.98, gray); 
+        a = clamp(a * 1.5, 0.0, 1.0);
+
+        floatPixels[dstIdx]   = r * a;
+        floatPixels[dstIdx+1] = g * a;
+        floatPixels[dstIdx+2] = b * a;
+        floatPixels[dstIdx+3] = a;
+      }
+    }
+
+    // 3. Upload to fixedPigTex
+    gl.bindTexture(gl.TEXTURE_2D, this.fixedPigTex[cur]);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, this.width, this.height, gl.RGBA, gl.FLOAT, floatPixels);
+
+    // 4. Force a render to update the view
+    // (Actual simulation step happens in RAF)
+  }
+
   public saveUndoState() {
     this.blitTex(this.wetTex[this.currentIdx], this.undoWetFB);
     this.blitTex(this.pigTex[this.currentIdx], this.undoPigFB);
@@ -432,23 +526,4 @@ export class SimulationEngine {
     this.drawQuad();
   }
 
-  /** Clear all state */
-  public reset() {
-    const gl = this.gl;
-    const fbs = [
-      this.wetFB[0], this.wetFB[1],
-      this.pigFB[0], this.pigFB[1],
-      this.fixedPigFB[0], this.fixedPigFB[1],
-      this.undoWetFB, this.undoPigFB,
-      this.undoFixedPigFB,
-    ];
-    fbs.forEach(fb => {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
-      gl.clearColor(0, 0, 0, 0);
-      gl.clear(gl.COLOR_BUFFER_BIT);
-    });
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    this.currentIdx = 0;
-    this.prevMousePos = null;
-  }
 }

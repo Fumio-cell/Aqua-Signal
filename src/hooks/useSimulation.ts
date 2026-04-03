@@ -181,5 +181,9 @@ export function useSimulation(width: number, height: number) {
     if (blob) downloadBlob(blob, `watercolor_transparent_${size}px_${timestamp()}.png`);
   }, []);
 
-  return { canvasRef, engineRef, params, updateParams, undo, exportPNG, exportTransparentPNG };
+  const importImage = useCallback((img: HTMLImageElement) => {
+    engineRef.current?.importImage(img);
+  }, []);
+
+  return { canvasRef, engineRef, params, updateParams, undo, exportPNG, exportTransparentPNG, importImage };
 }

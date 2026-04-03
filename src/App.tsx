@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { useSimulation } from './hooks/useSimulation';
 import { Snowflake, Play, RotateCcw, Download, Zap } from 'lucide-react';
 import { Header } from './components/Header';
@@ -16,8 +16,9 @@ const PRESET_COLORS = [
 const App: React.FC = () => {
   const width  = 1024;
   const height = 1024;
-  const { canvasRef, engineRef, params, updateParams, undo, exportPNG, exportTransparentPNG } =
+  const { canvasRef, engineRef, params, updateParams, undo, exportPNG, exportTransparentPNG, importImage } =
     useSimulation(width, height);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [colorHex, setColorHex] = useState('#1a40d0');
   const [user, setUser] = useState<any>(null);
@@ -68,6 +69,21 @@ const App: React.FC = () => {
   };
   const handleMouseUp = () => updateParams({ isMouseDown: false });
 
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const img = new Image();
+      img.onload = () => {
+        importImage(img);
+      };
+      img.src = event.target?.result as string;
+    };
+    reader.readAsDataURL(file);
+  };
+
   const hexToRgb = (hex: string): [number, number, number] => [
     parseInt(hex.slice(1,3),16)/255,
     parseInt(hex.slice(3,5),16)/255,
@@ -108,10 +124,38 @@ const App: React.FC = () => {
       <div className="main-container">
       {/* ============ LEFT – Color Panel ============ */}
       <aside className="left-panel">
-        <div className="left-panel-header">Mode</div>
+        <div className="left-panel-header">Project</div>
+        {/* ---- Image Import ---- */}
+        <div className="knob-wrap" style={{ marginTop: 8, marginBottom: 16, width: '100%', padding: '0 12px' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', width: '100%' }}>
+            <button 
+              className="btn btn-secondary" 
+              onClick={() => fileInputRef.current?.click()} 
+              style={{ padding: '14px 8px', fontSize: '13px', fontWeight: '700', borderRadius: '12px', background: 'rgba(74,143,255,0.18)', border: '1px solid var(--accent)' }}
+            >
+              📥 Import Image
+            </button>
+            <button 
+              className="btn btn-secondary" 
+              onClick={() => { if(confirm('Clear canvas?')) { engineRef.current?.clear(); }}} 
+              style={{ padding: '8px', fontSize: '11px', opacity: 0.6, border: '1px solid transparent', background: 'transparent' }}
+            >
+              🗑️ Clear Canvas
+            </button>
+          </div>
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handleFileChange}
+            accept="image/*"
+            style={{ display: 'none' }}
+          />
+        </div>
+
+        <div className="left-panel-header">Brush Mode</div>
 
         {/* ---- Ink / Water モード切替 ---- */}
-        <div className="mode-toggle">
+        <div className="mode-toggle" style={{ marginBottom: 16 }}>
           <button
             className={`mode-btn ${!params.waterOnly ? 'mode-btn--active' : ''}`}
             onClick={() => updateParams({ waterOnly: false })}
@@ -124,7 +168,7 @@ const App: React.FC = () => {
           >💧 Water</button>
         </div>
 
-        <div className="left-panel-header" style={{marginTop: 8}}>Color</div>
+        <div className="left-panel-header">Ink Color</div>
 
         {/* Current color preview + picker button */}
         <div className="color-preview-wrap">
