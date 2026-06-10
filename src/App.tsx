@@ -24,24 +24,24 @@ const App: React.FC = () => {
   const [user, setUser] = useState<any>(null);
   const [isPro, setIsPro] = useState(false);
 
-  // 認証状態の監視
+  // Watch auth state
   React.useEffect(() => {
     const handleAuth = (e: any) => {
       setUser(e.detail.user);
       setIsPro(e.detail.isPro);
     };
     window.addEventListener('auth:status', handleAuth);
-    // 初期状態の取得（Headerがマウント済みの場合）
+    // Get initial state (if Header is already mounted)
     if ((window as any).__isPro !== undefined) {
       setIsPro((window as any).__isPro);
     }
     return () => window.removeEventListener('auth:status', handleAuth);
   }, []);
 
-  // PRO 権限チェック
+  // PRO permission check
   const checkPro = (actionName: string) => {
     if (!isPro && user) {
-      if (confirm(`${actionName} は PRO 限定機能です。ライセンスを購入しますか？`)) {
+      if (confirm(`${actionName} is a PRO-only feature. Would you like to purchase a license?`)) {
         openLemonSqueezyCheckout(user.id);
       }
       return false;
@@ -96,7 +96,7 @@ const App: React.FC = () => {
     updateParams({ pigmentColor: [r, g, b, params.pigmentColor[3]] });
   };
 
-  /* ── スライダーコンポーネント ── */
+  /* ── Slider component ── */
   const SliderRow = ({
     label, value, min, max, step, onChange, unit = '', large = false
   }: {
@@ -154,17 +154,17 @@ const App: React.FC = () => {
 
         <div className="left-panel-header">Brush Mode</div>
 
-        {/* ---- Ink / Water モード切替 ---- */}
+        {/* ---- Ink / Water mode toggle ---- */}
         <div className="mode-toggle" style={{ marginBottom: 16 }}>
           <button
             className={`mode-btn ${!params.waterOnly ? 'mode-btn--active' : ''}`}
             onClick={() => updateParams({ waterOnly: false })}
-            title="インクを落とす"
+            title="Drop ink"
           >🎨 Ink</button>
           <button
             className={`mode-btn mode-btn--water ${params.waterOnly ? 'mode-btn--active-water' : ''}`}
             onClick={() => updateParams({ waterOnly: true })}
-            title="水だけを落とす（顔料が外側に押し出される）"
+            title="Drop water only (pushes pigment outward)"
           >💧 Water</button>
         </div>
 
@@ -173,7 +173,7 @@ const App: React.FC = () => {
         {/* Current color preview + picker button */}
         <div className="color-preview-wrap">
           <div className="color-preview" style={{ background: colorHex }} />
-          <label className="custom-btn" title="カスタムカラーを選ぶ">
+          <label className="custom-btn" title="Choose custom color">
             <input
               type="color"
               value={colorHex}
@@ -216,15 +216,15 @@ const App: React.FC = () => {
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseUp}
       >
-        {/* ── トップバー: スライダー + 右端にRunボタン ── */}
+        {/* ── Topbar: sliders + Run button on right ── */}
         <div className="canvas-topbar">
 
-          {/* ① Undo（左端・小） */}
-          <button className="btn-icon" onClick={undo} title="Undo（1ストローク戻す）">
+          {/* Undo (left, small) */}
+          <button className="btn-icon" onClick={undo} title="Undo (revert last stroke)">
             <RotateCcw size={15} />
           </button>
 
-          {/* ② スライダー群（均等に） */}
+          {/* Slider group (evenly spaced) */}
           <SliderRow label="Brush Size" value={params.brushSize}
             min={10} max={300} step={5} unit="px" large
             onChange={v => updateParams({ brushSize: v })} />
@@ -235,14 +235,14 @@ const App: React.FC = () => {
             min={0.05} max={1} step={0.05} large
             onChange={v => updateParams({ waterAmount: v })} />
 
-          {/* セパレーター */}
+          {/* Separator */}
           <div className="topbar-sep" />
 
-          {/* ③ RUN / FREEZE ボタン（右端・大・右利き最適） */}
+          {/* RUN / FREEZE button (right, large) */}
           <button
             className={`btn-main-action ${isFrozen ? 'btn-main-action--run' : 'btn-main-action--freeze'}`}
             onClick={() => updateParams({ isPlaying: !params.isPlaying })}
-            title={isFrozen ? 'Run – シミュレーション再開' : 'Freeze – 現在の状態を固定'}
+            title={isFrozen ? 'Run – Resume simulation' : 'Freeze – Lock current state'}
           >
             {isFrozen
               ? <><Play size={15}/> Run</>
@@ -282,6 +282,9 @@ const App: React.FC = () => {
           <SliderRow label="Evaporation" value={params.evaporation}
             min={0} max={0.03} step={0.001}
             onChange={v => updateParams({ evaporation: v })} />
+          <SliderRow label="Re-activation" value={params.dissolveRate}
+            min={0} max={1.0} step={0.01}
+            onChange={v => updateParams({ dissolveRate: v })} />
         </div>
 
         {/* --- Effects --- */}
@@ -310,7 +313,7 @@ const App: React.FC = () => {
           </button>
           <button className="btn btn-secondary" onClick={() => checkPro('Transparent Export') && exportTransparentPNG(2048)}
             style={{ marginTop: 6 }}>
-            <Zap size={10} style={{marginRight: 4}}/> 透過 PNG  2K (PRO)
+            <Zap size={10} style={{marginRight: 4}}/> Transparent PNG  2K (PRO)
           </button>
           <p className="seed-label">Seed: {params.seed.toFixed(0)}</p>
           <p className="seed-label" style={{fontSize: 9}}>

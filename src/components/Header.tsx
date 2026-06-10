@@ -12,18 +12,18 @@ export const Header: React.FC = () => {
         const client = supabase;
         if (!client) return;
 
-        // 初期ユーザー取得
+        // Get initial user
         client.auth.getUser().then(({ data: { user: foundUser } }: any) => {
             setUser(foundUser);
-            // 開発中は便宜上常にProとする（本番ではDBプロフィールを参照）
+            // Always set Pro for development (check DB profile in production)
             const finalPro = true; 
             (window as any).__isPro = finalPro;
             setIsPro(finalPro);
-            // 他のコンポーネントへ通知
+            // Notify other components
             window.dispatchEvent(new CustomEvent('auth:status', { detail: { user: foundUser, isPro: finalPro } }));
         });
 
-        // 状態変更を監視
+        // Watch for auth state changes
         const { data: authListener } = client.auth.onAuthStateChange(async (_event: any, session: any) => {
             const currentUser = session?.user ?? null;
             setUser(currentUser);
@@ -44,7 +44,7 @@ export const Header: React.FC = () => {
     return (
         <header className="toolkit-header">
             <div className="header-left">
-                {/* Poetic Signal ブランド */}
+                {/* Poetic Signal brand */}
                 <div className="toolkit-brand">
                     <svg className="brand-icon" viewBox="0 0 48 48" fill="none">
                         <ellipse cx="24" cy="26" rx="17" ry="14" stroke="#5ce0fc" strokeWidth="1" opacity="0.3" strokeDasharray="2 3"/>
@@ -227,16 +227,10 @@ export const Header: React.FC = () => {
                     <div className="info-modal" onClick={e => e.stopPropagation()}>
                         <button className="info-close" onClick={() => setShowInfo(false)}><X className="w-5 h-5"/></button>
                         <h2>Aqua-Signal</h2>
-                        <h3>Watercolor Physics Engine | 水彩物理シミュレーション・エンジン</h3>
-
-                        <div style={{ marginBottom: '20px' }}>
-                            <div style={{ display: 'inline-block', background: 'rgba(255,255,255,0.1)', padding: '2px 8px', borderRadius: '4px', fontSize: '10px', fontWeight: 'bold', marginBottom: '8px' }}>EN</div>
-                            <p>Aqua-Signal simulates the physics of watercolor ink diffusing through washi paper. Using a GPU-accelerated Resistor Network model, it generates authentic granulation, edge darkening, and backrun (bloom) effects. Export as standard PNG or transparent PNG for use in any design workflow.</p>
-                        </div>
+                        <h3>Watercolor Physics Engine</h3>
 
                         <div>
-                            <div style={{ display: 'inline-block', background: 'rgba(255,255,255,0.1)', padding: '2px 8px', borderRadius: '4px', fontSize: '10px', fontWeight: 'bold', marginBottom: '8px' }}>JP</div>
-                            <p>Aqua-Signalは、和紙に水彩インクが浸透する物理現象をGPU上でリアルタイムシミュレーションするツールです。不均一な拡散、顔料の粒状感、エッジの暗色化を再現。透過PNGエクスポートに対応。</p>
+                            <p>Aqua-Signal simulates the physics of watercolor ink diffusing through washi paper. Using a GPU-accelerated Resistor Network model, it generates authentic granulation, edge darkening, and backrun (bloom) effects. Export as standard PNG or transparent PNG for use in any design workflow.</p>
                         </div>
                     </div>
                 </div>,

@@ -15,16 +15,17 @@ export function useSimulation(width: number, height: number) {
     flowIrregularity: 0.5,
     spread: 0.35,
     evaporation: 0.002,
-    granulation: 0.75,
+    granulation: 0.40,
     edgeDarkening: 0.4,
     bloom: 0.3,
+    dissolveRate: 0.15,
     flowSpeed: 50.0,
     isPlaying: true,
     mousePos: [0, 0],
     isMouseDown: false,
     brushSize: 80,
     waterAmount: 0.7,
-    pigmentColor: [0.10, 0.25, 0.82, 1.2], // Slightly denser by default
+    pigmentColor: [0.10, 0.25, 0.82, 0.4], // Reduced density for transparency
     injectionForce: 1.5,
     paperRoughness: 1.4,
     waterOnly: false,
@@ -34,7 +35,7 @@ export function useSimulation(width: number, height: number) {
   const paramsRef = useRef<SimulationParams>(params);
   useEffect(() => { paramsRef.current = params; }, [params]);
 
-  // glRef: WebGLコンテキストをexport関数から参照できるようにする
+  // glRef: allow export functions to access the WebGL context
   const lastTimeRef = useRef<number>(0);
   const glRef = useRef<WebGL2RenderingContext | null>(null);
 
@@ -45,6 +46,8 @@ export function useSimulation(width: number, height: number) {
     });
     if (!gl) { alert('WebGL 2 not supported'); return; }
     gl.getExtension('EXT_color_buffer_float');
+    gl.getExtension('OES_texture_half_float_linear'); // Important for smooth advection
+    gl.getExtension('OES_texture_float_linear');
     glRef.current = gl;
 
     engineRef.current = new SimulationEngine(gl, width, height);
@@ -57,14 +60,15 @@ export function useSimulation(width: number, height: number) {
 
       if (engineRef.current) {
         // Sub-stepping for stability at high flowSpeed
-        // 1フレームを 32分割して計算することで、爆発を防ぎつつ高速化を実現
+        // Sub-step 32 times per frame to prevent blowup while achieving high speed
         if (p.isPlaying) {
           const subSteps = 32;
           const subDT = dt / subSteps;
           for (let i = 0; i < subSteps; i++) {
+            // Run interact inside loop to smooth out input
+            engineRef.current.interact(p, subDT);
             engineRef.current.step(p, subDT);
           }
-          engineRef.current.interact(p);
         }
         engineRef.current.render(p);
       }
@@ -78,7 +82,7 @@ export function useSimulation(width: number, height: number) {
   const updateParams = useCallback((next: Partial<SimulationParams>) => {
     setParams(prev => {
       const newState = { ...prev, ...next };
-      // 停止 (isPlaying: false) に切り替わった瞬間に強制定着させる
+      // Fix all pigment at the moment playback is stopped (isPlaying: false)
       if (prev.isPlaying && !newState.isPlaying) {
         engineRef.current?.fixAllPigment();
       }
@@ -90,7 +94,7 @@ export function useSimulation(width: number, height: number) {
     engineRef.current?.restoreUndoState();
   }, []);
 
-  /** ダウンロードヘルパー */
+  /** Download helper */
   const downloadBlob = (blob: Blob, name: string) => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -101,19 +105,19 @@ export function useSimulation(width: number, height: number) {
 
   const timestamp = () => new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
 
-  /** 通常 PNG（オプションで2Kにアップスケール）*/
+  /** Standard PNG (optionally upscaled to 2K) */
   const exportPNG = useCallback(async (size: number = 1024) => {
     const src = canvasRef.current;
     if (!src) return;
 
     if (size === src.width) {
-      // ネイティブサイズはそのままblob
+      // Native size: export as blob directly
       const blob = await new Promise<Blob | null>(r => src.toBlob(r, 'image/png'));
       if (blob) downloadBlob(blob, `watercolor_${size}px_${timestamp()}.png`);
       return;
     }
 
-    // アップスケール: 2D canvasで高品質リサンプリング
+    // Upscale: high-quality resampling via 2D canvas
     const out = document.createElement('canvas');
     out.width = size; out.height = size;
     const ctx = out.getContext('2d')!;
@@ -124,15 +128,15 @@ export function useSimulation(width: number, height: number) {
     if (blob) downloadBlob(blob, `watercolor_${size}px_${timestamp()}.png`);
   }, []);
 
-  /** 透過 PNG：紙の背景色を除算してインクのみを抽出 */
+  /** Transparent PNG: divide out paper background to extract ink only */
   const exportTransparentPNG = useCallback(async (size: number = 1024) => {
     const src = canvasRef.current;
     if (!src) return;
 
     const W = src.width, H = src.height;
 
-    // preserveDrawingBuffer:true なので WebGL canvas を 2D canvas に drawImage して取得
-    // gl.readPixels より確実（FBO状態・Y軸・alpha:false の問題を全て回避）
+    // Since preserveDrawingBuffer:true, draw WebGL canvas to 2D canvas for readback
+    // More reliable than gl.readPixels (avoids FBO state / Y-axis / alpha:false issues)
     const read2d = document.createElement('canvas');
     read2d.width = W; read2d.height = H;
     const readCtx = read2d.getContext('2d', { willReadFrequently: true })!;
@@ -140,24 +144,24 @@ export function useSimulation(width: number, height: number) {
     const imageData = readCtx.getImageData(0, 0, W, H);
     const pixels = imageData.data; // Uint8ClampedArray (RGBA, in-place)
 
-    // 紙のベースカラー (RENDER_FRAG の paperBase に合わせる)
+    // Paper base color (matches RENDER_FRAG paperBase)
     // vec3(0.970, 0.960, 0.940) → (247, 245, 240)
     const PR = 247, PG = 245, PB = 240;
 
     for (let i = 0; i < pixels.length; i += 4) {
       const r = pixels[i], g = pixels[i+1], b = pixels[i+2];
 
-      // 紙色からの差分（明るい紙に対してインクは暗いor着色）
+      // Difference from paper color (ink is darker/colored against light paper)
       const dr = PR - r, dg = PG - g, db = PB - b;
-      // 各チャンネルの最大差分でインク密度を推定（0=紙, 1=純粋インク）
-      const rawInk = Math.max(dr, dg, db, 0) / 140; // 140≈55%の差でalpha=1
-      const alpha  = Math.min(1, rawInk * 1.4);     // 少し増幅してエッジを明確に
+      // Estimate ink density from max channel difference (0=paper, 1=pure ink)
+      const rawInk = Math.max(dr, dg, db, 0) / 140; // 140 ≈ 55% diff → alpha=1
+      const alpha  = Math.min(1, rawInk * 1.4);     // Slightly amplify to sharpen edges
 
       if (alpha < 0.01) {
-        // ほぼ紙色 → 完全透明
+        // Nearly paper color → fully transparent
         pixels[i] = 0; pixels[i+1] = 0; pixels[i+2] = 0; pixels[i+3] = 0;
       } else {
-        // インク色を逆算: pix = paper*(1-a) + ink*a → ink = (pix - paper*(1-a)) / a
+        // Back-calculate ink color: pix = paper*(1-a) + ink*a => ink = (pix - paper*(1-a)) / a
         pixels[i]   = Math.min(255, Math.max(0, Math.round((r - PR * (1 - alpha)) / alpha)));
         pixels[i+1] = Math.min(255, Math.max(0, Math.round((g - PG * (1 - alpha)) / alpha)));
         pixels[i+2] = Math.min(255, Math.max(0, Math.round((b - PB * (1 - alpha)) / alpha)));
@@ -165,7 +169,7 @@ export function useSimulation(width: number, height: number) {
       }
     }
 
-    // ネイティブサイズ → 出力サイズへスケール
+    // Scale from native size to output size
     const native = document.createElement('canvas');
     native.width = W; native.height = H;
     native.getContext('2d')!.putImageData(new ImageData(pixels, W, H), 0, 0);
