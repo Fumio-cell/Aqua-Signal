@@ -43,10 +43,9 @@ body {
 }
 
 .left-panel-header {
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 2px;
-  text-transform: uppercase;
+  font-family: 'Fraunces', serif;
+  font-size: 12px;
+  font-weight: 500;
   color: var(--muted);
   margin-bottom: 4px;
 }
@@ -304,10 +303,9 @@ input.range--large {
 }
 
 .panel-header {
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 1.5px;
-  text-transform: uppercase;
+  font-family: 'Fraunces', serif;
+  font-size: 12px;
+  font-weight: 500;
   color: var(--muted);
   margin-bottom: 2px;
 }
