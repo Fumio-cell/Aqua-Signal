@@ -178,6 +178,11 @@
 
   <!-- ============ LEFT: ink & modes ============ -->
   <div class="left-panel">
+    <div class="left-panel-header" style="margin-top:4px">Project</div>
+    <div class="knob-wrap" style="width:100%; padding: 0 10px 12px 10px;">
+      <input type="file" id="imageInput" accept="image/*" style="display:none">
+      <button class="btn btn-secondary" id="importBtn" style="font-size:10px; padding:6px; font-weight:700;">📥 Import Image</button>
+    </div>
     <div class="left-panel-header">Ink</div>
     <div class="color-preview-wrap">
       <div class="color-preview" id="colorPreview"></div>
@@ -231,23 +236,23 @@
       <div class="slider-row">
         <div class="slider-label-row">
           <span class="control-label">Vorticity</span>
-          <span class="slider-value" id="curlVal">26</span>
+          <span class="slider-value" id="curlVal">12</span>
         </div>
-        <input type="range" id="curlSlider" min="0" max="60" step="1" value="26">
+        <input type="range" id="curlSlider" min="0" max="60" step="1" value="12">
       </div>
       <div class="slider-row">
         <div class="slider-label-row">
           <span class="control-label">Velocity Decay</span>
-          <span class="slider-value" id="velVal">0.55</span>
+          <span class="slider-value" id="velVal">1.20</span>
         </div>
-        <input type="range" id="velSlider" min="0.05" max="3" step="0.05" value="0.55">
+        <input type="range" id="velSlider" min="0.05" max="3" step="0.05" value="1.20">
       </div>
       <div class="slider-row">
         <div class="slider-label-row">
           <span class="control-label">Ink Fade (lower = stays)</span>
-          <span class="slider-value" id="dyeVal">0.06</span>
+          <span class="slider-value" id="dyeVal">0.00</span>
         </div>
-        <input type="range" id="dyeSlider" min="0" max="1" step="0.01" value="0.06">
+        <input type="range" id="dyeSlider" min="0" max="1" step="0.01" value="0.00">
       </div>
     </div>
 
@@ -291,13 +296,13 @@ gl.getExtension('EXT_color_buffer_float');
 const CFG = {
   simRes: 256,           // velocity field long edge
   dyeRes: 1100,          // dye field long edge
-  velDiss: 0.55,         // velocity decay
-  dyeDiss: 0.06,         // ink fade (small = stays)
+  velDiss: 1.20,         // velocity decay
+  dyeDiss: 0.00,         // ink fade (small = stays)
   pressureIters: 22,
-  curl: 26,              // vortex strength
+  curl: 12,              // vortex strength
   splatForce: 5200,
   forceScale: 1.0,
-  paper: [0.927,0.906,0.859],
+  paper: [0.99, 0.99, 0.99],
 };
 
 const INKS = [
@@ -399,7 +404,19 @@ uniform sampler2D uVel, uSrc;
 uniform vec2 uTexel;
 uniform float uDt, uDiss;
 void main(){
-  vec2 coord = vUv - uDt * texture(uVel, vUv).xy * uTexel;
+  vec2 vel = texture(uVel, vUv).xy;
+  float spd = length(vel);
+  
+  // If the fluid is barely moving, use exact pixel fetch to prevent ANY bilinear filtering blur
+  if (spd < 0.5) {
+    ivec2 iuv = ivec2(gl_FragCoord.xy);
+    vec4 r = texelFetch(uSrc, iuv, 0);
+    o = r / (1.0 + uDiss * uDt);
+    return;
+  }
+  
+  vel *= smoothstep(0.5, 2.0, spd);
+  vec2 coord = vUv - uDt * vel * uTexel;
   vec4 r = texture(uSrc, coord);
   o = r / (1.0 + uDiss * uDt);
 }`);
@@ -507,6 +524,28 @@ const progClear = program(`
 uniform sampler2D uTarget; uniform float uMul;
 void main(){ o = texture(uTarget, vUv) * uMul; }`);
 
+const progImportImage = program(`
+uniform sampler2D uDye, uImage;
+uniform float uAspect, uImgAspect;
+void main(){
+  vec2 scale = vec2(1.0);
+  if (uAspect > uImgAspect) {
+    scale.x = uImgAspect / uAspect;
+  } else {
+    scale.y = uAspect / uImgAspect;
+  }
+  vec2 imgUv = (vUv - 0.5) / scale + 0.5;
+  
+  if(imgUv.x < 0.0 || imgUv.x > 1.0 || imgUv.y < 0.0 || imgUv.y > 1.0){
+    o = texture(uDye, vUv);
+  } else {
+    vec4 color = texture(uImage, vec2(imgUv.x, 1.0 - imgUv.y)); // flip Y
+    vec4 base = texture(uDye, vUv);
+    vec3 A = -log(max(color.rgb, 0.02)) * 0.9;
+    o = vec4(mix(base.rgb, A, color.a), mix(base.a, 0.0, color.a));
+  }
+}`);
+
 const progRender = program(`
 uniform sampler2D uDye;
 uniform vec2 uTexel;        // dye texel (neighbor sampling)
@@ -519,51 +558,17 @@ void main(){
   vec3 A = max(d.rgb, 0.0);
   float wet = d.a;
 
-  vec2 px = vUv * uOutSize;
-
-  // washi fiber: anisotropic two-layer noise
-  float fiberH = vnoise(vec2(px.x*0.13, px.y*1.7));
-  float fiberV = vnoise(vec2(px.x*1.7,  px.y*0.13));
-  float fiber = mix(fiberH, fiberV, 0.35);
-  float grain = vnoise(px*0.9);
-
-  // granulation: pigment settles in paper hollows
-  float vor = voronoi(px*0.16);
-  float lumA = dot(A, vec3(0.299,0.587,0.114));
-  float gran = (smoothstep(0.15,0.75,vor)-0.4) * 0.5;
-  A *= 1.0 + gran * smoothstep(0.02, 0.6, lumA) * 0.55;
-
-  // fiber resistance subtly modulates density
-  A *= 0.93 + 0.14*fiber;
-
-  // wet-frontier edge darkening
-  float wL = texture(uDye, vUv - vec2(uTexel.x,0.)).a;
-  float wR = texture(uDye, vUv + vec2(uTexel.x,0.)).a;
-  float wB = texture(uDye, vUv - vec2(0.,uTexel.y)).a;
-  float wT = texture(uDye, vUv + vec2(0.,uTexel.y)).a;
-  float gw = length(vec2(wR-wL, wT-wB));
-  float edge = smoothstep(0.0, 0.25, gw) * smoothstep(0.01, 0.3, lumA);
-  A *= 1.0 + edge * 0.9;
-
   // subtractive mixing
   vec3 ink = exp(-A * 1.6);
 
   if(uAlphaMode > 0.5){
-    // compositing over white must reproduce "white * ink":
-    // out = col*a + (1-a)  =>  col = (ink - (1-a)) / a
     float alpha = clamp(1.0 - min(ink.r, min(ink.g, ink.b)), 0.0, 1.0);
     vec3 col = (alpha > 0.004) ? clamp((ink - (1.0 - alpha)) / alpha, 0.0, 1.0) : vec3(0.);
-    o = vec4(col, alpha);  // straight (non-premultiplied) alpha
+    o = vec4(col, alpha);
     return;
   }
 
-  vec3 paper = uPaper * (0.965 + 0.05*fiber) * (0.985 + 0.03*grain);
-  vec3 col = paper * ink;
-
-  // washi edge deckle
-  vec2 e = min(vUv, 1.0-vUv);
-  float vig = smoothstep(0.0, 0.06, min(e.x, e.y));
-  col *= mix(0.9 + 0.04*vnoise(px*0.5), 1.0, vig);
+  vec3 col = uPaper * ink;
 
   o = vec4(col, 1.0);
 }`);
@@ -650,11 +655,24 @@ function applySplat(s){
   gl.useProgram(progSplat.p);
   gl.uniform1i(progSplat.u.uTarget, bindTex(0, velocity.read.tex));
   gl.uniform2f(progSplat.u.uPoint, s.x, s.y);
-  gl.uniform3f(progSplat.u.uColor, s.dx*CFG.splatForce*CFG.forceScale, s.dy*CFG.splatForce*CFG.forceScale, 0);
+  // ink: gentle deposit, water: moderate push
+  const vForce = (s.kind === 'ink') ? 0.15 : 1.5;
+  gl.uniform3f(progSplat.u.uColor, s.dx*CFG.splatForce*CFG.forceScale*vForce, s.dy*CFG.splatForce*CFG.forceScale*vForce, 0);
   gl.uniform1f(progSplat.u.uW, 0);
-  gl.uniform1f(progSplat.u.uRadius, baseR*(s.kind==='water'?2.2:1.0));
+  gl.uniform1f(progSplat.u.uRadius, baseR*(s.kind==='water'?3.5:1.0));
   gl.uniform1f(progSplat.u.uAspect, aspect);
   blit(velocity.write); velocity.swap();
+
+  // Water: also add a radial outward push to dissolve ink outward from the brush center
+  if(s.kind==='water'){
+    gl.useProgram(progRadial.p);
+    gl.uniform1i(progRadial.u.uTarget, bindTex(0, velocity.read.tex));
+    gl.uniform2f(progRadial.u.uPoint, s.x, s.y);
+    gl.uniform1f(progRadial.u.uStrength, 8.0 * CFG.forceScale);
+    gl.uniform1f(progRadial.u.uRadius, baseR*4.0);
+    gl.uniform1f(progRadial.u.uAspect, aspect);
+    blit(velocity.write); velocity.swap();
+  }
 
   if(s.kind==='ink' || s.kind==='drop'){
     const kasure = 0.72 + 0.28*Math.random();
@@ -673,8 +691,8 @@ function applySplat(s){
     gl.uniform1i(progSplat.u.uTarget, bindTex(0, dye.read.tex));
     gl.uniform2f(progSplat.u.uPoint, s.x, s.y);
     gl.uniform3f(progSplat.u.uColor, 0,0,0);
-    gl.uniform1f(progSplat.u.uW, 0.25);
-    gl.uniform1f(progSplat.u.uRadius, baseR*2.2);
+    gl.uniform1f(progSplat.u.uW, 0.4);
+    gl.uniform1f(progSplat.u.uRadius, baseR*3.5);
     gl.uniform1f(progSplat.u.uAspect, aspect);
     blit(dye.write); dye.swap();
   }
@@ -804,7 +822,8 @@ function render(){
 
 let last = performance.now();
 function loop(now){
-  const dt = Math.min((now-last)/1000, 1/30);
+  // Scale down dt by 0.15 to make the simulation flow much slower
+  const dt = Math.min((now-last)/1000, 1/30) * 0.15;
   last = now;
   step(dt);
   render();
@@ -871,8 +890,45 @@ function toast(msg){
   toastEl.textContent = msg;
   toastEl.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(()=>toastEl.classList.remove('show'), 2200);
+  toastTimer = setTimeout(() => toastEl.classList.remove('show'), 3000);
 }
+
+const imageInput = document.getElementById('imageInput');
+document.getElementById('importBtn').addEventListener('click', () => imageInput.click());
+imageInput.addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if(!file) return;
+  const img = new Image();
+  img.onload = () => {
+    // create tex
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+    
+    // clear velocity so it starts completely dry (no flow)
+    gl.useProgram(progClear.p);
+    gl.uniform1i(progClear.u.uTarget, bindTex(0, velocity.read.tex));
+    gl.uniform1f(progClear.u.uMul, 0.0);
+    blit(velocity.write); velocity.swap();
+
+    // blit into dye field
+    gl.useProgram(progImportImage.p);
+    gl.uniform1i(progImportImage.u.uDye, bindTex(0, dye.read.tex));
+    gl.uniform1i(progImportImage.u.uImage, bindTex(1, tex));
+    gl.uniform1f(progImportImage.u.uAspect, canvas.width / canvas.height);
+    gl.uniform1f(progImportImage.u.uImgAspect, img.width / img.height);
+    blit(dye.write); dye.swap();
+    
+    gl.deleteTexture(tex);
+    imageInput.value = '';
+    toast('Image imported! Add Water to make it bleed.');
+  };
+  img.src = URL.createObjectURL(file);
+});
 
 // modes
 const modesEl = document.getElementById('modes');
